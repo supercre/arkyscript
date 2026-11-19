@@ -54,9 +54,9 @@ lua.dostring("assert(sum(20, 22) == 42)");
 
 `make setup` 후 C++20 컴파일러로 `make binder-test`, `make binder-sanitize`를 실행합니다. Windows x64는 `make windows` 후 `make binder-windows`로 xwin 크로스 빌드를 확인합니다. LuaJIT 업데이트 검증에도 바인더의 네이티브 테스트와 Windows 빌드를 포함합니다. [바인딩 API 안내](binder/README.md), [실행 예제](examples/cpp_binder.cpp)를 참고하세요.
 
-`make binder-examples`는 [클래스·생성자·프로퍼티](examples/cpp_class.cpp)와 [C++20 concept 기반 공통 동작](examples/cpp_traits.cpp)을 포함한 C++ 예제 5개를 실행합니다. 여기에는 실제 OS 스레드 풀을 사용하는 [Task 예제](examples/cpp_tasks.cpp)도 포함됩니다. [예제 목록](examples/README.md)에는 C++ 및 스크립트 `class`·`trait`의 실행 명령과 출력을 정리했습니다.
+`make binder-examples`는 [클래스·생성자·프로퍼티](examples/cpp_class.cpp)와 [C++20 concept 기반 공통 동작](examples/cpp_traits.cpp)을 포함한 C++ 예제 6개를 실행합니다. 여기에는 실제 OS 스레드 풀을 사용하는 [Task 예제](examples/cpp_tasks.cpp)도 포함됩니다. [예제 목록](examples/README.md)에는 C++ 및 스크립트 `class`·`trait`의 실행 명령과 출력을 정리했습니다.
 
-타입 이름과 `lua_CFunction`으로 작성한 기존·생성 바인딩은 `reg_named_class("cc.Node")`와 `named_object`로 등록합니다. 클래스 등록·상속·객체 동일성·소유권·만료를 바인더가 처리하므로 엔진 어댑터는 공개 API만 사용합니다. [이름 기반 클래스 안내](binder/README.md#이름으로-등록하는-네이티브-클래스)를 참고하세요.
+기존 엔진 바인딩처럼 스크립트가 `Class:create()`, 오버로드, 객체의 Lua 필드에 의존하는 API는 이름 기반 클래스로 등록합니다. `reg_named_class<Node>("cc.Node").reg_base<Ref>().reg_method(...)`처럼 `reg_class<T>`와 같은 형식으로 쓰고, `lua_CFunction`으로 작성한 raw 멤버도 같은 클래스에 둘 수 있습니다. [이름 기반 클래스 안내](binder/README.md#이름으로-등록하는-네이티브-클래스)와 [예제](examples/cpp_named_class.cpp)를 참고하세요.
 
 네이티브 `Sprite : Node` 관계는 `.reg_base<Node>()`로 등록합니다. 부모 메서드·프로퍼티 접근과 부모 포인터·참조·`shared_ptr` 변환을 지원합니다. [렌더링 바인딩 예제](examples/cpp_rendering.cpp), [상속 규칙과 trait 확장 설계](docs/native-bindings.md)에 등록 순서·충돌·수명 규칙을 정리했습니다.
 

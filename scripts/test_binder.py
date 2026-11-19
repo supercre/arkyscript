@@ -13,9 +13,10 @@ TEST_SOURCES = tuple(ROOT / "tests" / "binder" / name for name in
                      ("arg.cpp", "converter.cpp", "object.cpp", "value.cpp", "binder.cpp",
                       "raw_callbacks.cpp", "stack_balance.cpp", "class_stack.cpp",
                       "inheritance.cpp", "ref_object.cpp", "compatibility.cpp",
-                      "named_class.cpp", "named_adapter.cpp")) + (ROOT / "tests/task/pool.cpp", ROOT / "tests/task/lua.cpp", ROOT / "tests/io/io.cpp")
+                      "named_class.cpp", "named_adapter.cpp", "named_typed.cpp")) + (ROOT / "tests/task/pool.cpp", ROOT / "tests/task/lua.cpp", ROOT / "tests/io/io.cpp")
 EXAMPLE_SOURCES = tuple(ROOT / "examples" / name for name in
-                        ("cpp_binder.cpp", "cpp_class.cpp", "cpp_traits.cpp", "cpp_tasks.cpp", "cpp_rendering.cpp"))
+                        ("cpp_binder.cpp", "cpp_class.cpp", "cpp_traits.cpp", "cpp_tasks.cpp", "cpp_rendering.cpp",
+                         "cpp_named_class.cpp"))
 SOURCES = TEST_SOURCES + EXAMPLE_SOURCES
 
 

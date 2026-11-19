@@ -151,27 +151,37 @@ lua.invalidate_named_object(sprite, "cc.Node");    // native 소멸 통지
 
 등록 API(`named_class`)는 다른 등록 API처럼 `arky::error`를 던집니다. `named_object` 함수는 raw 콜백 안에서 쓰도록 C++ 예외를 던지지 않으며 실패를 반환값으로 알립니다. 다른 Lua API처럼 메모리를 할당하는 호출은 메모리 부족 오류를 낼 수 있습니다. `pointer`·`type_name`·`own`·`disown`·`unpin`과 등록된 타입에 대한 `invalidate`는 할당하지 않으므로 보호 호출 밖의 소멸자에서도 사용할 수 있습니다. 모든 호출은 VM의 스레드에서 수행합니다.
 
-typed 함수에서 이름 기반 객체를 받으려면 포인터를 감싼 값 타입에 `arky::converter<T>`를 정의합니다. 같은 클래스에 raw 멤버와 typed 멤버를 함께 등록할 수 있습니다.
+### typed 등록
+
+`reg_named_class<T>(name)`은 같은 클래스를 `reg_class<T>`와 같은 형식으로 등록합니다. 객체 모델은 이름 기반 클래스 그대로이고, C++ 타입 `T`가 그 클래스에 연결됩니다. raw 멤버와 typed 멤버를 한 클래스에 함께 둘 수 있고, 이름만으로 등록한 클래스가 typed 클래스를 부모로 삼을 수 있습니다.
 
 ```cpp
-struct NodeRef { Node* value; };
-namespace arky {
-template<> struct converter<NodeRef> {
-    static constexpr bool enabled = true;
-    static NodeRef read(lua_State* L, int index) {
-        auto* node = named_object::is_a(L, index, "cc.Node")
-            ? static_cast<Node*>(named_object::pointer(L, index)) : nullptr;
-        if (!node) throw error("expected a live cc.Node");
-        return {node};
-    }
-    static void push(lua_State* L, NodeRef node) {
-        if (!named_object::push(L, node.value, "cc.Node")) throw error("cc.Node is not registered");
-    }
-};
-}
-
-lua.reg_named_class("cc.Node").reg_method("moveBy", [](NodeRef self, float dx, float dy) { self.value->moveBy(dx, dy); });
+lua.reg_named_class<Ref>("cc.Ref")
+    .reg_native_lifetime(true)            // native 소유: 객체가 살아 있는 동안 래퍼와 Lua 필드 유지
+    .enable_expired_guard()
+    .publish("cc.Ref");
+lua.reg_named_class<Node>("cc.Node").chain_void_methods()
+    .reg_base<Ref>()
+    .reg_static("create", [] { return Node::create(); })
+    .reg_method("addChild",                               // 여러 callable은 오버로드
+        [](Node* self, Node* child) { self->addChild(child); },
+        [](Node* self, Node* child, int z) { self->addChild(child, z); })
+    .reg_func("getTag", &Node::getTag)
+    .reg_prop("name", &Node::getName, &Node::setName)
+    .publish("cc.Node");
 ```
+
+- `reg_method(name, callable...)`의 callable은 receiver를 첫 인자로 받습니다(`T*`, `T&`, `const T&`). 여러 개를 주면 오버로드이며, 인자 개수가 맞는 것 중 등록 순서대로 인자 변환에 처음 성공한 것을 호출합니다. `reg_static(name, callable...)`은 receiver가 없고 `Class:name(...)`으로 호출합니다. `reg_func(name, &T::method)`, `reg_var`, `reg_prop`은 `cpp_class<T>`와 같은 형태입니다.
+- callable은 상태가 없는 람다·함수 포인터·멤버 포인터처럼 자원을 갖지 않아야 합니다. 캡처 없는 람다는 저장소 없이 바로 Lua 함수가 됩니다.
+- `.chain_void_methods()` 이후 등록한 멤버는 `void`를 반환할 때 receiver를 돌려줘 `node:setTag(1):setName("a")`처럼 이어 쓸 수 있습니다.
+- `reg_base<Base>()`의 `Base`는 먼저 `reg_named_class<Base>`로 연결해 둡니다. 이름 기반 클래스는 포인터를 보정하지 않으므로 `Base`는 `T`의 첫 번째 비가상 부모여야 합니다.
+- **인자 변환**은 `arky::named_value<T>`가 담당합니다. 기본 규칙은 raw 바인딩이 쓰는 Lua C API 변환입니다. 숫자는 숫자 문자열을 받고 정수 타입의 범위로 잘라 맞추며, `bool`은 nil을 false로, `std::string`·`const char*`는 숫자와 nil(빈 문자열)을 받습니다. enum은 정수로 변환합니다. 그 밖의 값 타입은 `converter<T>`와 핵심 변환을 사용합니다. 호스트는 스칼라를 포함한 어떤 타입이든 `named_value<T>`를 특수화해 기존 바인딩의 변환과 똑같이 맞출 수 있습니다. `read`는 실패를 반환값으로 알리므로 오버로드 선택에 예외를 쓰지 않습니다.
+- **객체 인자**: 연결된 타입의 포인터 인자는 nil과 만료된 래퍼를 nullptr로 받고(raw 바인딩과 동일), 참조 인자는 살아 있는 객체만 받습니다. receiver가 만료된 객체이면 `expired native object` 오류입니다. 타입 판정에 이름 문자열을 쓰지 않습니다.
+- **결과**: 연결된 타입의 포인터·참조는 같은 포인터의 래퍼를 재사용합니다. 다형 타입은 `typeid`로 실제 객체의 등록된 클래스를 찾아 노출하며, 등록되지 않은 파생 타입은 정적 타입의 클래스로 노출합니다. `lua_owned<T>{pointer}`를 반환하면 Lua가 소유하고 collector가 해제합니다. `named_object::push(L, pointer)`도 같은 경로를 사용합니다.
+- `reg_native_lifetime(pin, hook)`은 native가 소유하는 계층의 래퍼 수명을 정합니다. 래퍼를 새로 만들 때 `hook(object)`을 부르고, `pin`이면 `invalidate`까지 래퍼와 필드를 유지합니다. 가장 가까운 클래스의 설정을 사용합니다.
+- C++ 예외는 Lua 오류가 됩니다. 맞는 오버로드가 없으면 `invalid arguments to 'name'` 오류입니다.
+
+[실행 예제](../examples/cpp_named_class.cpp)와 [typed 등록 테스트](../tests/binder/named_typed.cpp)를 참고하세요.
 
 `reg_class<T>`로 등록한 typed 객체와 이름 기반 객체는 서로 다른 userdata이며 자동으로 변환하지 않습니다. [등록·동일성·필드·소유권·만료 테스트](../tests/binder/named_class.cpp)를 참고하세요. 타입 선언, 모듈·클래스 열기, 예약 이름, 배열 속성처럼 스택 기반으로 등록하는 기존 코드를 공개 API만으로 연결하는 방법은 [어댑터 계약 테스트](../tests/binder/named_adapter.cpp)와 [호스트 어댑터 경계](../docs/binder-extensibility.md#구현한-이름-기반-클래스-등록)에 있습니다.
 

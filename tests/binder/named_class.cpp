@@ -681,7 +681,8 @@ void typed_bridge_and_foreign_values() {
     )");
     fails([&] { lua.dostring("attach(sprite, typed)"); }, "expected a Node");
     fails([&] { lua.dostring("attach(sprite, 5)"); }, "expected a Node");
-    fails([&] { lua.dostring("sprite:shift('bad')"); }, "number");
+    fails([&] { lua.dostring("sprite:shift('bad')"); }, "invalid arguments to 'shift'");
+    lua.dostring("assert(sprite:shift('2'):x() == 6 and sprite:shift(-2):x() == 4)");
     fails([&] { lua.dostring("typed_value(sprite)"); }, "wrong or expired C++ object");
     check(lua.invalidate_named_object(&node, "Node") == 1, "expire a typed argument");
     fails([&] { lua.dostring("attach(sprite, node)"); }, "expired Node");

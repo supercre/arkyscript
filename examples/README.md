@@ -81,6 +81,8 @@ make binder-examples
 
 ## 네이티브 상속과 렌더링 명령 수집
 
+[cpp_named_class.cpp](cpp_named_class.cpp)는 엔진 형태의 `Ref`·`Node`·`Sprite`를 이름 기반 클래스로 typed 등록합니다. `Class:create()` 팩토리, 오버로드, setter 연결 호출, native 객체의 Lua 필드와 소멸 통지를 보여줍니다.
+
 [cpp_rendering.cpp](cpp_rendering.cpp)는 `Sprite`를 `Node`로 전달하고 부모 메서드를 호출하는 C++ 호스트 예제입니다. 스크립트는 상태를 설정하고 네이티브 Renderer가 명령을 모읍니다. 실제 GPU를 사용하지 않으며 `make binder-examples`로 실행하면 `Native render queue: 2 commands`를 출력합니다. [상속 규칙](../docs/native-bindings.md)을 참고하세요.
 
 ## 분리된 trait 구현

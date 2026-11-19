@@ -55,6 +55,9 @@ public:
     // Classes identified by a runtime name, for raw generated or legacy
     // bindings. Creates the class on first use and reopens it afterwards.
     named_class reg_named_class(std::string_view type) { return named_class(L_, type); }
+    // The same class with typed registration in the form of reg_class<T>: T
+    // is bound to the named class, so typed members convert T* and T&.
+    template<class T> named_class_of<T> reg_named_class(std::string_view type) { return named_class_of<T>(L_, type); }
     // Destruction notice for an object exposed through named_object::push.
     std::size_t invalidate_named_object(void* value, std::string_view type) {
         return named_object::invalidate(L_, value, type);

@@ -6,6 +6,16 @@
 #include "lua_cclosure.h"
 #include <cstddef>
 #include <cstring>
+#include <typeindex>
+#include <typeinfo>
+#include <unordered_map>
+
+// Typed pushes pick the registered class of the dynamic type when RTTI exists.
+#if defined(__cpp_rtti) || defined(__GXX_RTTI) || defined(_CPPRTTI)
+#define ARKY_BINDER_RTTI 1
+#else
+#define ARKY_BINDER_RTTI 0
+#endif
 
 namespace arky::detail {
 // The pointer comes first so a wrapper can be read as a boxed native pointer.
@@ -30,6 +40,16 @@ inline char named_natives_key;   // member table: values a script replaced throu
 inline char named_operators_key; // member table: operators registered on this class
 inline char named_derived_key;   // member table: true once another class names it as its base
 inline char named_guard_key;     // member table: whether expired objects refuse native calls
+inline char named_bound_key;     // member table: type key of the C++ type bound to this class
+inline char named_lifetime_key;  // member table: how wrappers of natively owned objects are kept
+inline char named_dynamic_key;   // registry: dynamic C++ type -> member table
+// Identifies the named class bound to C++ type T: a registry key for its member
+// table and an entry in the kinds of every class derived from it.
+template<class T> inline char named_type_key;
+struct named_lifetime {
+    bool pin = false;
+    void (*exposed)(void*) noexcept = nullptr;
+};
 inline constexpr const char* const named_operator_events[] = {
     "__add", "__sub", "__mul", "__div", "__mod", "__pow", "__unm",
     "__concat", "__len", "__lt", "__le", "__eq", "__call"};
@@ -420,6 +440,11 @@ inline void named_inherit(lua_State* L, int cls) {
         named_get(L, current, &named_name_key);
         lua_pushboolean(L, true);
         lua_rawset(L, kinds);
+        named_get(L, current, &named_bound_key);
+        if (lua_islightuserdata(L, -1)) {
+            lua_pushboolean(L, true);
+            lua_rawset(L, kinds);
+        } else lua_pop(L, 1);
         if (!lua_getmetatable(L, current)) break;
         named_get(L, current + 1, &named_name_key);
         const bool named = lua_type(L, -1) == LUA_TSTRING;
@@ -451,9 +476,421 @@ template<class F> void named_each_derived(lua_State* L, int cls, F&& action) {
     }
     lua_pop(L, 1);
 }
+
+// The nearest class that configures native lifetime decides how a new wrapper
+// is kept. Runs only when a wrapper is created.
+inline void named_apply_lifetime(lua_State* L, int members, int wrapper, void* pointer) {
+    lua_pushvalue(L, members);
+    while (true) {
+        lua_pushlightuserdata(L, &named_lifetime_key);
+        lua_rawget(L, -2);
+        if (lua_type(L, -1) == LUA_TUSERDATA && lua_objlen(L, -1) == sizeof(named_lifetime)) break;
+        lua_pop(L, 1);
+        if (!lua_getmetatable(L, -1)) { lua_pop(L, 1); return; }
+        lua_remove(L, -2);
+    }
+    const named_lifetime policy = *static_cast<named_lifetime*>(lua_touserdata(L, -1));
+    lua_pop(L, 2);
+    if (policy.exposed) policy.exposed(pointer);
+    if (!policy.pin) return;
+    named_get(L, members, &named_cache_key);
+    if (push_named_pins(L, lua_gettop(L), true)) {
+        lua_pushlightuserdata(L, pointer);
+        lua_pushvalue(L, wrapper);
+        lua_rawset(L, -3);
+    }
+    lua_pop(L, 2);
+}
+// Replaces the member table at absolute index members with the wrapper for
+// pointer: the cached one, refined to a more specific class, or a new one.
+inline bool named_push_at(lua_State* L, void* pointer, int members) {
+    named_get(L, members, &named_cache_key);
+    const int cache = members + 1;
+    if (!lua_istable(L, cache)) { lua_settop(L, members - 1); lua_pushnil(L); return false; }
+    lua_pushlightuserdata(L, pointer);
+    lua_rawget(L, cache);
+    const auto* box = named_box(L, -1);
+    if (box && box->value == pointer) {
+        lua_getmetatable(L, -1);
+        const bool keep = named_derives(L, lua_gettop(L), members);
+        lua_pop(L, 1);
+        if (!keep) { lua_pushvalue(L, members); lua_setmetatable(L, -2); }
+    } else {
+        lua_pop(L, 1);
+        ::new (lua_newuserdata(L, sizeof(named_storage))) named_storage{pointer, false};
+        lua_pushvalue(L, members);
+        lua_setmetatable(L, -2);
+        lua_pushvalue(L, LUA_REGISTRYINDEX); // marks "no instance fields"
+        lua_setfenv(L, -2);
+        lua_pushlightuserdata(L, pointer);
+        lua_pushvalue(L, -2);
+        lua_rawset(L, cache);
+        named_apply_lifetime(L, members, lua_gettop(L), pointer);
+    }
+    lua_replace(L, members);
+    lua_settop(L, members);
+    return true;
+}
+
+// Classes bound to a C++ type. A typed argument is accepted when the object's
+// class has the type among its kinds; no name is hashed on this path.
+enum class named_match { no, expired, yes };
+template<class C> named_match named_bound(lua_State* L, int index, C*& out) {
+    if (lua_type(L, index) != LUA_TUSERDATA || lua_objlen(L, index) != sizeof(named_storage)
+        || !lua_checkstack(L, 3) || !lua_getmetatable(L, index)) return named_match::no;
+    lua_pushlightuserdata(L, &named_kinds_key);
+    lua_rawget(L, -2);
+    bool kind = false;
+    if (lua_istable(L, -1)) {
+        lua_pushlightuserdata(L, &named_type_key<C>);
+        lua_rawget(L, -2);
+        kind = lua_toboolean(L, -1) != 0;
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 2);
+    if (!kind) return named_match::no;
+    out = static_cast<C*>(static_cast<named_storage*>(lua_touserdata(L, index))->value);
+    return out ? named_match::yes : named_match::expired;
+}
+template<class C> bool push_named_bound(lua_State* L) {
+    lua_pushlightuserdata(L, &named_type_key<C>);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (lua_istable(L, -1)) return true;
+    lua_pop(L, 1);
+    return false;
+}
+#if ARKY_BINDER_RTTI
+// One per VM: the member table of each bound polymorphic type, so a base
+// pointer is exposed as the registered class of the object it points to.
+struct named_dynamic_types { std::unordered_map<std::type_index, int> slots; };
+inline int collect_named_dynamic(lua_State* L) noexcept {
+    if (lua_type(L, 1) == LUA_TUSERDATA && lua_objlen(L, 1) == sizeof(named_dynamic_types))
+        static_cast<named_dynamic_types*>(lua_touserdata(L, 1))->~named_dynamic_types();
+    return 0;
+}
+inline void named_register_dynamic(lua_State* L, const std::type_info& type, int members) {
+    stack_guard stack(L);
+    reserve(L, 8);
+    lua_pushlightuserdata(L, &named_dynamic_key);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (lua_type(L, -1) != LUA_TUSERDATA) {
+        lua_pop(L, 1);
+        ::new (lua_newuserdata(L, sizeof(named_dynamic_types))) named_dynamic_types{};
+        lua_newtable(L);
+        lua_pushcfunction(L, collect_named_dynamic);
+        lua_setfield(L, -2, "__gc");
+        lua_setmetatable(L, -2);
+        lua_newtable(L);
+        lua_setfenv(L, -2);
+        lua_pushlightuserdata(L, &named_dynamic_key);
+        lua_pushvalue(L, -2);
+        lua_rawset(L, LUA_REGISTRYINDEX);
+    }
+    auto& slots = static_cast<named_dynamic_types*>(lua_touserdata(L, -1))->slots;
+    lua_getfenv(L, -1);
+    const auto found = slots.find(std::type_index(type));
+    const int slot = found != slots.end() ? found->second : static_cast<int>(lua_objlen(L, -1)) + 1;
+    lua_pushvalue(L, members);
+    lua_rawseti(L, -2, slot);
+    slots[std::type_index(type)] = slot;
+}
+inline bool push_named_dynamic(lua_State* L, const std::type_info& type) {
+    lua_pushlightuserdata(L, &named_dynamic_key);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (lua_type(L, -1) != LUA_TUSERDATA) { lua_pop(L, 1); return false; }
+    const auto& slots = static_cast<named_dynamic_types*>(lua_touserdata(L, -1))->slots;
+    const auto found = slots.find(std::type_index(type));
+    if (found == slots.end()) { lua_pop(L, 1); return false; }
+    lua_getfenv(L, -1);
+    lua_rawgeti(L, -1, found->second);
+    lua_replace(L, -3);
+    lua_pop(L, 1);
+    if (lua_istable(L, -1)) return true;
+    lua_pop(L, 1);
+    return false;
+}
+#endif
+template<class T> void named_bind(lua_State* L, int members) {
+    static_assert(std::is_class_v<T> && !std::is_const_v<T>);
+    stack_guard stack(L);
+    reserve(L, 12);
+    lua_pushlightuserdata(L, &named_type_key<T>);
+    lua_pushvalue(L, members);
+    lua_rawset(L, LUA_REGISTRYINDEX);
+    lua_pushlightuserdata(L, &named_type_key<T>);
+    named_set(L, members, &named_bound_key);
+#if ARKY_BINDER_RTTI
+    if constexpr (std::is_polymorphic_v<T>) named_register_dynamic(L, typeid(T), members);
+#endif
+    named_each_derived(L, members, [L](int cls) { named_inherit(L, cls); });
+}
+// Pushes the wrapper for a pointer whose static type is bound to a named
+// class. Returns false and pushes nil when it is not.
+template<class C> bool named_push_object(lua_State* L, C* object) {
+    using U = std::remove_cv_t<C>;
+    if (!object) { lua_pushnil(L); return true; }
+    bool found = false;
+#if ARKY_BINDER_RTTI
+    if constexpr (std::is_polymorphic_v<U>) found = push_named_dynamic(L, typeid(*object));
+#endif
+    if (!found) found = push_named_bound<U>(L);
+    if (!found) { lua_pushnil(L); return false; }
+    return named_push_at(L, const_cast<U*>(object), lua_gettop(L));
+}
 } // namespace arky::detail
 
 namespace arky {
+// Result of a typed member: Lua takes ownership of the returned object and the
+// class collector releases it.
+template<class T> struct lua_owned { T* value; };
+
+// Conversion of a value type for typed members of named classes. The primary
+// template follows the Lua C API coercions that raw bindings rely on: numbers
+// accept numeric strings and saturate to the target type, bool accepts nil,
+// std::string accepts numbers and nil. Other types use converter<T> and the
+// core conversions. A host may specialize it for any type, scalars included,
+// to match the conversions of bindings it replaces: read reports failure
+// through its result and push adds one value.
+template<class T, class = void> struct named_value {
+    // Plain classes are not values: they are objects of a bound named class.
+    static constexpr bool enabled = !detail::object_type<T>;
+    static bool read(lua_State* L, int index, T& out) {
+        if constexpr (std::is_same_v<T, bool>) {
+            const int type = lua_type(L, index);
+            if (type != LUA_TBOOLEAN && type != LUA_TNIL) return false;
+            out = lua_toboolean(L, index) != 0;
+            return true;
+        } else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) {
+            if (!lua_isnumber(L, index)) return false;
+            out = number<T>(lua_tonumber(L, index));
+            return true;
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            const int type = lua_type(L, index);
+            if (type != LUA_TSTRING && type != LUA_TNUMBER && type != LUA_TNIL) return false;
+            std::size_t size = 0;
+            const char* text = lua_tolstring(L, index, &size);
+            out.assign(text ? text : "", size);
+            return true;
+        } else {
+            try { out = detail::read<T>(L, index); return true; }
+            catch (const std::exception&) { return false; }
+        }
+    }
+    static void push(lua_State* L, const T& value) {
+        if constexpr (std::is_same_v<T, bool>) lua_pushboolean(L, value);
+        else if constexpr (std::is_arithmetic_v<T>) lua_pushnumber(L, static_cast<lua_Number>(value));
+        else if constexpr (std::is_enum_v<T>)
+            lua_pushnumber(L, static_cast<lua_Number>(static_cast<std::underlying_type_t<T>>(value)));
+        else if constexpr (std::is_same_v<T, std::string>) lua_pushlstring(L, value.data(), value.size());
+        else detail::push(L, value);
+    }
+private:
+    template<class N> static N number(lua_Number value) {
+        if constexpr (std::is_enum_v<N>) return static_cast<N>(number<std::underlying_type_t<N>>(value));
+        else if constexpr (std::is_floating_point_v<N>) return static_cast<N>(value);
+        else {
+            if (!(value == value)) return N{};
+            if (value <= static_cast<lua_Number>(std::numeric_limits<N>::lowest())) return std::numeric_limits<N>::lowest();
+            if (value >= static_cast<lua_Number>(std::numeric_limits<N>::max())) return std::numeric_limits<N>::max();
+            return static_cast<N>(value);
+        }
+    }
+};
+} // namespace arky
+
+namespace arky::detail {
+template<class C> inline constexpr bool named_bound_type = std::is_class_v<C> && !named_value<C>::enabled;
+
+// One parameter of a typed member: where its value is read from and how it is
+// handed to the callable. Values live in the reader for the call.
+template<class P, class = void> struct named_arg {
+    using value_type = std::remove_cvref_t<P>;
+    static_assert(!std::is_rvalue_reference_v<P>, "Lua arguments cannot bind to C++ rvalue references");
+    static_assert(!std::is_lvalue_reference_v<P> || std::is_const_v<std::remove_reference_t<P>>,
+                  "Mutable references require an object of a bound named class");
+    static constexpr bool object = false;
+    value_type value{};
+    bool read(lua_State* L, int index) { return named_value<value_type>::read(L, index, value); }
+    P get() { if constexpr (std::is_reference_v<P>) return value; else return std::move(value); }
+};
+// nil and an expired wrapper arrive as nullptr, as raw bindings pass them.
+template<class C> struct named_arg<C*, std::enable_if_t<named_bound_type<std::remove_cv_t<C>>>> {
+    static constexpr bool object = true;
+    C* value = nullptr;
+    bool live = true;
+    bool read(lua_State* L, int index) {
+        if (lua_isnoneornil(L, index)) return true;
+        std::remove_cv_t<C>* found = nullptr;
+        const auto match = named_bound<std::remove_cv_t<C>>(L, index, found);
+        if (match == named_match::no) return false;
+        live = match == named_match::yes;
+        value = found;
+        return true;
+    }
+    C* get() { return value; }
+};
+template<class C> struct named_arg<C&, std::enable_if_t<named_bound_type<std::remove_cv_t<C>>>> {
+    static constexpr bool object = true;
+    C* value = nullptr;
+    bool live = true;
+    bool read(lua_State* L, int index) {
+        std::remove_cv_t<C>* found = nullptr;
+        const auto match = named_bound<std::remove_cv_t<C>>(L, index, found);
+        live = match != named_match::expired;
+        value = found;
+        return match == named_match::yes;
+    }
+    C& get() { return *value; }
+};
+template<> struct named_arg<const char*, void> {
+    static constexpr bool object = false;
+    const char* value = "";
+    bool read(lua_State* L, int index) {
+        const int type = lua_type(L, index);
+        if (type == LUA_TNIL) return true;
+        if (type != LUA_TSTRING && type != LUA_TNUMBER) return false;
+        value = lua_tostring(L, index);
+        return true;
+    }
+    const char* get() { return value; }
+};
+
+template<class> struct named_owned_type : std::false_type {};
+template<class C> struct named_owned_type<lua_owned<C>> : std::true_type {};
+// R is the declared result type, so a returned reference is exposed in place.
+template<class R> void named_push_result(lua_State* L, std::type_identity_t<R> value) {
+    using U = std::remove_cvref_t<R>;
+    if constexpr (named_owned_type<U>::value) {
+        if (!named_push_object(L, value.value)) throw error("C++ type is not bound to a named class");
+        if (auto* box = named_box(L, -1); box && box->value) box->owned = true;
+    } else if constexpr (std::is_pointer_v<U> && named_bound_type<std::remove_cv_t<std::remove_pointer_t<U>>>) {
+        if (!named_push_object(L, value)) throw error("C++ type is not bound to a named class");
+    } else if constexpr (std::is_same_v<U, const char*> || std::is_same_v<U, char*>) {
+        lua_pushstring(L, value);
+    } else if constexpr (named_bound_type<U>) {
+        static_assert(std::is_lvalue_reference_v<R>, "Return an object of a bound named class by pointer or reference");
+        if (!named_push_object(L, &value)) throw error("C++ type is not bound to a named class");
+    } else {
+        named_value<U>::push(L, value);
+    }
+}
+
+struct named_call { int results = 0; bool expired = false; };
+// Converts the arguments of one overload and calls it. A false result means
+// the arguments do not fit and the next overload is tried.
+template<bool Method, bool Chain, class F, std::size_t... I>
+bool named_attempt(lua_State* L, F& function, named_call& call, std::index_sequence<I...>) {
+    using traits = function_traits<F>;
+    using arguments = typename traits::arguments;
+    std::tuple<named_arg<std::tuple_element_t<I, arguments>>...> values;
+    const int first = Method ? 1 : 2;
+    if (!(std::get<I>(values).read(L, first + static_cast<int>(I)) && ...)) {
+        if constexpr (Method && sizeof...(I) > 0) {
+            // A receiver that is the right kind of object but no longer alive ends the call.
+            using receiver = std::tuple_element_t<0, std::tuple<named_arg<std::tuple_element_t<I, arguments>>...>>;
+            if constexpr (receiver::object) {
+                if (!std::get<0>(values).live) { call.expired = true; return true; }
+            }
+        }
+        return false;
+    }
+    if constexpr (Method && sizeof...(I) > 0) {
+        using receiver = std::tuple_element_t<0, std::tuple<named_arg<std::tuple_element_t<I, arguments>>...>>;
+        if constexpr (receiver::object) {
+            if (!std::get<0>(values).live) { call.expired = true; return true; }
+            if constexpr (std::is_pointer_v<std::tuple_element_t<0, arguments>>) {
+                if (!std::get<0>(values).value) return false;
+            }
+        }
+    }
+    if constexpr (std::is_void_v<typename traits::result>) {
+        function(std::get<I>(values).get()...);
+        if (Chain) lua_settop(L, 1);
+        call.results = Chain ? 1 : 0;
+    } else {
+        named_push_result<typename traits::result>(L, function(std::get<I>(values).get()...));
+        call.results = 1;
+    }
+    return true;
+}
+inline int named_call_error(lua_State* L, bool expired) {
+    if (expired) return luaL_error(L, "expired native object");
+    lua_Debug info{};
+    const char* name = lua_getstack(L, 0, &info) && lua_getinfo(L, "n", &info) && info.name ? info.name : "?";
+    return luaL_error(L, "invalid arguments to '%s' (%d given)", name, lua_gettop(L) - 1);
+}
+// Overloads are tried in registration order among those with the given
+// argument count. Slot 1 is the receiver: the object, or the class for statics.
+// A C++ exception becomes a Lua error; like every Lua error of this layer it
+// is raised after the callable's arguments and temporaries are destroyed.
+template<bool Method, bool Chain, class... F> int named_dispatch(lua_State* L, F&... functions) {
+    static_assert(!Method || (... && (function_traits<F>::arity > 0)), "A typed method needs an explicit receiver parameter");
+    char message[512];
+    named_call call;
+    bool done = false, thrown = false;
+    try {
+        reserve(L, 8);
+        const int count = lua_gettop(L) - 1;
+        done = ((static_cast<int>(function_traits<F>::arity) - (Method ? 1 : 0) == count
+            && named_attempt<Method, Chain>(L, functions, call, std::make_index_sequence<function_traits<F>::arity>{})) || ...);
+    } catch (const std::exception& exception) {
+        std::snprintf(message, sizeof(message), "%s", exception.what());
+        thrown = true;
+    } catch (...) {
+        std::snprintf(message, sizeof(message), "%s", "unknown C++ exception");
+        thrown = true;
+    }
+    if (thrown) {
+        lua_pushstring(L, message);
+        return lua_error(L);
+    }
+    if (done && !call.expired) return call.results;
+    return named_call_error(L, call.expired);
+}
+// Captureless callables need no storage: the thunk itself is the Lua function.
+template<bool Method, bool Chain, class... F> int named_thunk(lua_State* L) {
+    std::tuple<F...> functions;
+    return std::apply([L](F&... each) { return named_dispatch<Method, Chain, F...>(L, each...); }, functions);
+}
+template<bool Method, bool Chain, class... F> int named_closure(lua_State* L) {
+    auto* functions = static_cast<std::tuple<F...>*>(lua_touserdata(L, lua_upvalueindex(1)));
+    return std::apply([L](F&... each) { return named_dispatch<Method, Chain, F...>(L, each...); }, *functions);
+}
+template<bool Method, bool Chain, class... F> void push_named_function(lua_State* L, F&&... functions) {
+    static_assert(sizeof...(F) > 0, "Register at least one callable");
+    using pack = std::tuple<std::decay_t<F>...>;
+    static_assert(std::is_trivially_destructible_v<pack>,
+                  "Typed members of named classes hold no resources: keep state in the bound object");
+    if constexpr ((... && (std::is_empty_v<std::decay_t<F>> && std::is_default_constructible_v<std::decay_t<F>>))) {
+        lua_pushcfunction(L, (named_thunk<Method, Chain, std::decay_t<F>...>));
+    } else {
+        ::new (lua_newuserdata(L, sizeof(pack))) pack(std::forward<F>(functions)...);
+        lua_pushcclosure(L, (named_closure<Method, Chain, std::decay_t<F>...>), 1);
+    }
+}
+// Member function pointers become callables with an explicit receiver.
+template<class T, class R, class C, class... A> auto named_member(R (C::*function)(A...)) {
+    return [function](T& self, A... args) -> R { return (self.*function)(std::forward<A>(args)...); };
+}
+template<class T, class R, class C, class... A> auto named_member(R (C::*function)(A...) const) {
+    return [function](const T& self, A... args) -> R { return (self.*function)(std::forward<A>(args)...); };
+}
+template<class T, class R, class C, class... A> auto named_member(R (C::*function)(A...) noexcept) {
+    return [function](T& self, A... args) -> R { return (self.*function)(std::forward<A>(args)...); };
+}
+template<class T, class R, class C, class... A> auto named_member(R (C::*function)(A...) const noexcept) {
+    return [function](const T& self, A... args) -> R { return (self.*function)(std::forward<A>(args)...); };
+}
+// A raw variable getter receives (receiver, name); the typed getter sees the receiver only.
+template<class F> int named_getter(lua_State* L) {
+    lua_settop(L, 1);
+    return named_dispatch<true, false, F>(L, *static_cast<F*>(lua_touserdata(L, lua_upvalueindex(1))));
+}
+} // namespace arky::detail
+
+namespace arky {
+template<class T, bool Chain> class named_class_of;
+
 // Registration handle. The member table is a plain Lua table: it is the
 // metatable of every instance and of the public class table, and raw entries
 // are class members. __index, __newindex and __gc belong to the binder.
@@ -539,11 +976,18 @@ public:
         put(nullptr, name, [&] { lua_pushcfunction(L_, function); });
         return *this;
     }
-    // Typed callable. The receiver arrives as its first argument, usually a
-    // host value type whose converter reads a named object.
-    template<class F> requires (!std::is_convertible_v<F, lua_CFunction>)
-    named_class& reg_method(const char* name, F&& function) {
-        put(nullptr, name, [&] { detail::push_function(L_, std::forward<F>(function)); });
+    // Typed callables, converted with named_value. Each one names its
+    // receiver as the first parameter: a pointer or reference to a C++ type
+    // bound to a named class, or a host value type. Several callables form an
+    // overload set: the first one that fits the argument count and types runs.
+    template<class... F> named_class& reg_method(const char* name, F&&... overloads) {
+        put(nullptr, name, [&] { detail::push_named_function<true, false>(L_, std::forward<F>(overloads)...); });
+        return *this;
+    }
+    // Typed callables without a receiver, called as Class:name(...): the
+    // class table in slot 1 is skipped.
+    template<class... F> named_class& reg_static(const char* name, F&&... overloads) {
+        put(nullptr, name, [&] { detail::push_named_function<false, false>(L_, std::forward<F>(overloads)...); });
         return *this;
     }
     template<class V> named_class& reg_value(const char* name, V&& value) {
@@ -623,6 +1067,18 @@ public:
         detail::named_set(L_, members, &detail::named_guard_key);
         return *this;
     }
+    // Wrappers of this class and its descendants stand for natively owned
+    // objects: exposed(pointer) runs when a wrapper is created, and with pin
+    // the wrapper and its fields stay alive until invalidate or unpin. The
+    // nearest class that sets this decides both.
+    named_class& reg_native_lifetime(bool pin, void (*exposed)(void* object) noexcept = nullptr) {
+        detail::stack_guard stack(L_);
+        detail::reserve(L_, 6);
+        const int members = push_self();
+        ::new (lua_newuserdata(L_, sizeof(detail::named_lifetime))) detail::named_lifetime{pin, exposed};
+        detail::named_set(L_, members, &detail::named_lifetime_key);
+        return *this;
+    }
     // Stores the public class table at a dotted global path.
     named_class& publish(std::string_view path) {
         detail::stack_guard stack(L_);
@@ -675,6 +1131,7 @@ public:
         lua_settop(L_, top + 1);
     }
 private:
+    template<class, bool> friend class named_class_of;
     int push_self() const {
         detail::reserve(L_, 4);
         if (!detail::push_named_members(L_, name_)) {
@@ -725,35 +1182,19 @@ struct named_object {
     // exposed as a base becomes the more specific class. Returns false and
     // pushes nil when type is not registered.
     static bool push(lua_State* L, void* pointer, std::string_view type) {
-        luaL_checkstack(L, 8, "native object");
+        luaL_checkstack(L, 10, "native object");
         if (!pointer) { lua_pushnil(L); return true; }
         const int members = lua_gettop(L) + 1;
         if (!detail::push_named_members(L, type)) { lua_settop(L, members - 1); lua_pushnil(L); return false; }
-        detail::named_get(L, members, &detail::named_cache_key);
-        const int cache = members + 1;
-        if (!lua_istable(L, cache)) { lua_settop(L, members - 1); lua_pushnil(L); return false; }
-        lua_pushlightuserdata(L, pointer);
-        lua_rawget(L, cache);
-        const auto* box = detail::named_box(L, -1);
-        if (box && box->value == pointer) {
-            lua_getmetatable(L, -1);
-            const bool keep = detail::named_derives(L, lua_gettop(L), members);
-            lua_pop(L, 1);
-            if (!keep) { lua_pushvalue(L, members); lua_setmetatable(L, -2); }
-        } else {
-            lua_pop(L, 1);
-            ::new (lua_newuserdata(L, sizeof(detail::named_storage))) detail::named_storage{pointer, false};
-            lua_pushvalue(L, members);
-            lua_setmetatable(L, -2);
-            lua_pushvalue(L, LUA_REGISTRYINDEX); // marks "no instance fields"
-            lua_setfenv(L, -2);
-            lua_pushlightuserdata(L, pointer);
-            lua_pushvalue(L, -2);
-            lua_rawset(L, cache);
-        }
-        lua_replace(L, members);
-        lua_settop(L, members);
-        return true;
+        return detail::named_push_at(L, pointer, members);
+    }
+    // The same for a pointer whose C++ type is bound to a named class
+    // (reg_named_class<T>). A polymorphic object is exposed as the registered
+    // class of its dynamic type.
+    template<class C> requires std::is_class_v<C>
+    static bool push(lua_State* L, C* object) {
+        luaL_checkstack(L, 10, "native object");
+        return detail::named_push_object(L, object);
     }
     // Native pointer of a live named object; nullptr for anything else,
     // including an invalidated wrapper.
@@ -891,5 +1332,126 @@ struct named_object {
         lua_setfenv(L, index);
         return true;
     }
+};
+
+// Typed registration on a named class, in the same form as cpp_class<T>:
+//   lua.reg_named_class<Sprite>("Sprite").reg_base<Node>().reg_func("frame", &Sprite::frame);
+// The class keeps the object model of named classes (members can be replaced,
+// instance fields shadow members, wrappers follow native lifetime), and T is
+// bound to it: pointers and references to T convert in typed members and
+// typed results, and named_object::push(L, T*) finds the class.
+// A named class does not adjust pointers, so T and its registered bases must
+// share one address (the registered base is the first, non-virtual base).
+// Chain selects whether a member returning void yields its receiver.
+template<class T, bool Chain = false> class named_class_of {
+public:
+    named_class_of(lua_State* L, std::string_view name) : class_(L, name) {
+        detail::stack_guard stack(L);
+        detail::named_bind<T>(L, class_.push_self());
+    }
+    [[nodiscard]] const std::string& name() const noexcept { return class_.name(); }
+    // The untyped handle, for registration this class does not repeat.
+    [[nodiscard]] named_class& named() noexcept { return class_; }
+    // Members returning void return their receiver, so calls can be chained.
+    [[nodiscard]] named_class_of<T, true> chain_void_methods() const { return named_class_of<T, true>(class_); }
+
+    template<class Base> named_class_of& reg_base() {
+        static_assert(std::is_base_of_v<Base, T> && !std::is_same_v<Base, T>,
+                      "reg_base requires a distinct C++ base of the bound type");
+        lua_State* L = class_.L_;
+        std::string base;
+        {
+            detail::stack_guard stack(L);
+            detail::reserve(L, 6);
+            if (!detail::push_named_bound<Base>(L)) throw error("C++ base is not bound to a named class");
+            detail::named_get(L, lua_gettop(L), &detail::named_name_key);
+            std::size_t size = 0;
+            const char* text = lua_tolstring(L, -1, &size);
+            base.assign(text ? text : "", size);
+        }
+        class_.reg_base(base);
+        return *this;
+    }
+    // Typed callables with an explicit receiver; several form an overload set.
+    template<class... F> named_class_of& reg_method(const char* name, F&&... overloads) {
+        class_.put(nullptr, name, [&] {
+            detail::push_named_function<true, Chain>(class_.L_, std::forward<F>(overloads)...);
+        });
+        return *this;
+    }
+    // Member functions of T or of its bases.
+    template<class F> requires std::is_member_function_pointer_v<F>
+    named_class_of& reg_func(const char* name, F function) {
+        if (!function) throw error("cannot register a null member function");
+        return reg_method(name, detail::named_member<T>(function));
+    }
+    // Class:name(...) functions without a receiver, such as factories.
+    template<class... F> named_class_of& reg_static(const char* name, F&&... overloads) {
+        class_.put(nullptr, name, [&] {
+            detail::push_named_function<false, Chain>(class_.L_, std::forward<F>(overloads)...);
+        });
+        return *this;
+    }
+    template<class C, class V> named_class_of& reg_var(const char* name, V C::* member) {
+        static_assert(std::is_base_of_v<C, T>);
+        if (!member) throw error("cannot register a null member variable");
+        property(name, [member](const T& self) -> const V& { return self.*member; });
+        if constexpr (!std::is_const_v<V>)
+            setter(name, [member](T& self, const V& value) { self.*member = value; });
+        return *this;
+    }
+    template<class G> named_class_of& reg_prop(const char* name, G getter) {
+        static_assert(std::is_member_function_pointer_v<G> && detail::function_traits<G>::arity == 0);
+        if (!getter) throw error("cannot register a null property getter");
+        property(name, detail::named_member<T>(getter));
+        return *this;
+    }
+    template<class G, class S> named_class_of& reg_prop(const char* name, G getter, S setter_function) {
+        static_assert(std::is_member_function_pointer_v<S> && detail::function_traits<S>::arity == 1);
+        if (!setter_function) throw error("cannot register a null property setter");
+        reg_prop(name, getter);
+        setter(name, detail::named_member<T>(setter_function));
+        return *this;
+    }
+    // See named_class::reg_native_lifetime. exposed is a captureless callable
+    // taking T*; it must not throw or call Lua.
+    named_class_of& reg_native_lifetime(bool pin) { class_.reg_native_lifetime(pin); return *this; }
+    template<class F> named_class_of& reg_native_lifetime(bool pin, F) {
+        static_assert(std::is_empty_v<F> && std::is_default_constructible_v<F>,
+                      "The exposure hook is a captureless callable");
+        class_.reg_native_lifetime(pin, +[](void* object) noexcept { F{}(static_cast<T*>(object)); });
+        return *this;
+    }
+
+    named_class_of& reg_raw_method(const char* name, lua_CFunction function) { class_.reg_raw_method(name, function); return *this; }
+    named_class_of& reg_raw_var(const char* name, lua_CFunction getter, lua_CFunction setter_function = nullptr) {
+        class_.reg_raw_var(name, getter, setter_function);
+        return *this;
+    }
+    named_class_of& reg_raw_index(lua_CFunction getter) { class_.reg_raw_index(getter); return *this; }
+    named_class_of& reg_raw_newindex(lua_CFunction setter_function) { class_.reg_raw_newindex(setter_function); return *this; }
+    named_class_of& reg_raw_operator(std::string_view event, lua_CFunction function) { class_.reg_raw_operator(event, function); return *this; }
+    named_class_of& reg_collector(lua_CFunction collector) { class_.reg_collector(collector); return *this; }
+    named_class_of& enable_expired_guard(bool enabled = true) { class_.enable_expired_guard(enabled); return *this; }
+    template<class V> named_class_of& reg_value(const char* name, V&& value) { class_.reg_value(name, std::forward<V>(value)); return *this; }
+    named_class_of& publish(std::string_view path) { class_.publish(path); return *this; }
+private:
+    template<class, bool> friend class named_class_of;
+    explicit named_class_of(named_class existing) : class_(std::move(existing)) {}
+    template<class F> void property(const char* name, F function) {
+        static_assert(std::is_trivially_destructible_v<F>);
+        class_.put(&detail::named_getters_key, name, [&] {
+            ::new (lua_newuserdata(class_.L_, sizeof(F))) F(std::move(function));
+            lua_pushcclosure(class_.L_, (detail::named_getter<F>), 1);
+        });
+        // Without a setter, assigning the name creates an instance field.
+        class_.put(&detail::named_setters_key, name, [&] { lua_pushnil(class_.L_); });
+    }
+    template<class F> void setter(const char* name, F function) {
+        class_.put(&detail::named_setters_key, name, [&] {
+            detail::push_named_function<true, false>(class_.L_, std::move(function));
+        });
+    }
+    named_class class_;
 };
 } // namespace arky
