@@ -4,7 +4,7 @@
   "description": "Arky script development tools powered by Tynex: diagnostics, syntax highlighting, and mapped debugging.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/corbie79/arkyscript.git",
+    "url": "https://github.com/supercre/arkyscript.git",
     "directory": "editors/vscode"
   },
   "version": "0.1.0",

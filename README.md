@@ -1,6 +1,6 @@
 # Arky — Lua 기반 타입 스크립트
 
-**Arky**는 Lua를 기반으로 타입·class·trait·async/await를 제공하는 스크립트 언어입니다. 이름은 에픽세븐의 Arky에서 따왔습니다. **Tynex = Type + Nexus**는 Arky의 도구 모음으로, 독립 Rust 컴파일러, `arky::` C++20 바인딩, VS Code·Zed의 구문 강조·LSP·디버깅 도구를 포함합니다. 저장소는 [corbie79/arkyscript](https://github.com/corbie79/arkyscript)입니다. 현재 실행·바인딩 검증 대상은 LuaJIT이며, 다른 Lua 버전 지원은 호환 계층과 별도 검증이 필요합니다.
+**Arky**는 Lua를 기반으로 타입·class·trait·async/await를 제공하는 스크립트 언어입니다. 이름은 에픽세븐의 Arky에서 따왔습니다. **Tynex = Type + Nexus**는 Arky의 도구 모음으로, 독립 Rust 컴파일러, `arky::` C++20 바인딩, VS Code·Zed의 구문 강조·LSP·디버깅 도구를 포함합니다. 저장소는 [supercre/arkyscript](https://github.com/supercre/arkyscript)입니다. 현재 실행·바인딩 검증 대상은 LuaJIT이며, 다른 Lua 버전 지원은 호환 계층과 별도 검증이 필요합니다.
 
 실행 명령은 `arky`입니다. 기존 `tynex` 명령을 사용하는 스크립트는 `arky`로 변경하세요. 프로젝트 설정은 `tynex.toml`, 환경 변수 접두사는 `TYNEX_`입니다. 스크립트는 `.arky`, 선언 파일은 `.d.arky` 확장자를 사용합니다. 에디터의 언어 이름은 `Arky`입니다. 이전 `.tlj`·`.d.tlj` 및 `.luax`·`.d.luax` 파일은 각각 `.arky`·`.d.arky`로 이름을 바꾸고 프로젝트 설정의 경로·glob도 갱신해야 합니다.
 
