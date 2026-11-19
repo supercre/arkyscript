@@ -56,7 +56,9 @@ void legacy_class(lua_State* L, const char* local, const char* type, const char*
     legacy_usertype(L, type);
     guarded(L, [&] {
         named_class cls(L, plain(type));
-        if (base && *base) cls.reg_base(plain(base));
+        // Existing declarations may name the class itself as its base: it has none then.
+        const auto parent = plain(base);
+        if (!parent.empty() && parent != plain(type)) cls.reg_base(parent);
         if (collector) cls.reg_collector(collector);
         cls.push_table();
     });
@@ -229,7 +231,7 @@ int create(lua_State* L) {
 }
 void install(lua_State* L) {
     legacy_open(L);
-    for (const char* type : {"cc.Base", "cc.Derived", "cc.Orphan"}) legacy_usertype(L, type);
+    for (const char* type : {"cc.Base", "cc.Derived", "cc.Orphan", "cc.Solo"}) legacy_usertype(L, type);
     legacy_begin(L, nullptr);
     legacy_module(L, "cc");
     legacy_begin(L, "cc");
@@ -246,6 +248,7 @@ void install(lua_State* L) {
     legacy_end(L);
     legacy_class(L, "Derived", "cc.Derived", "cc.Base", collector);
     legacy_class(L, "Orphan", "cc.Orphan", "cc.UnregisteredBase", nullptr);
+    legacy_class(L, "Solo", "cc.Solo", "cc.Solo", nullptr);
     legacy_end(L);
     legacy_end(L);
     // Code that bypasses the helpers reaches the member table through the registry.
@@ -284,6 +287,7 @@ int main() {
                 assert(legacy.type(getmetatable(cc.Derived)) == 'class cc.Derived')
                 assert(legacy.iskindof(obj, 'cc.Base') and legacy.iskindof(obj, 'const cc.Base'))
                 assert(legacy.iskindof(obj, 'cc.UnregisteredBase') == false)
+                assert(legacy.type(getmetatable(cc.Solo)) == 'class cc.Solo' and cc.Solo.method == nil)
                 assert(rawequal(legacy.cast(obj, 'cc.Base'), obj) and legacy.type(obj) == 'cc.Derived')
                 -- Objects inherit members; a class table exposes its own class.
                 assert(cc.Base.method(obj) == 7 and obj:method() == 7 and obj:late() == 7)
