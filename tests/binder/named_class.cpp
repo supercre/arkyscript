@@ -514,6 +514,50 @@ void pins_and_invalidation() {
     check(lua_gettop(L) == 0, "pin and invalidation keep the stack balanced");
 }
 
+void expired_guard() {
+    state vm;
+    binder lua(vm);
+    auto* L = vm.get();
+    register_nodes(lua);
+    // Raw callbacks written without an expiry check are kept out of reach.
+    lua.reg_named_class("Node").enable_expired_guard().reg_raw_index(node_index).reg_raw_newindex(node_newindex);
+    lua.reg_named_class("Loose").reg_base("Sprite").enable_expired_guard(false);
+    Sprite guarded, live, loose;
+    set_global(L, "guarded", &guarded, "Sprite");
+    set_global(L, "live", &live, "Sprite");
+    set_global(L, "loose", &loose, "Loose");
+    lua.dostring(R"(
+        guarded.tag = 1; loose.tag = 2
+        engine.Node.script = function(self) return 'script' end
+        native_move = guarded.move
+        assert(guarded[2] == 2 and guarded.pos == 0)
+    )");
+    check(lua.invalidate_named_object(&guarded, "Node") == 1 && lua.invalidate_named_object(&loose, "Node") == 1,
+          "expire a guarded and an unguarded object");
+    lua.dostring(R"(
+        local function refused(action)
+            local ok, message = pcall(action)
+            return not ok and tostring(message):find('expired native object', 1, true) ~= nil
+        end
+        -- Fields are gone; values and script-defined members stay readable.
+        assert(guarded.tag == nil and guarded.KIND == 7 and guarded:script() == 'script' and guarded.missing == nil)
+        -- A native function becomes one that raises, so no raw callback runs.
+        assert(type(guarded.move) == 'function' and guarded.move ~= native_move)
+        assert(refused(function() guarded:move(1) end) and refused(function() return guarded:x() end))
+        assert(refused(function() return guarded.pos end) and refused(function() guarded.pos = 1 end))
+        assert(refused(function() return guarded[2] end) and refused(function() guarded[2] = 1 end))
+        guarded.note = 'field'; assert(guarded.note == 'field')
+        -- Live objects of a guarded class are unaffected.
+        assert(live.move == native_move and live:move(2):x() == 2 and live[1] == 3)
+        -- The nearest setting wins: this class hands out the raw function as it is.
+        assert(loose.move == native_move and loose.tag == nil)
+        local ok, message = pcall(loose.move, loose, 1)
+        assert(not ok and message:find('expected a live Node', 1, true))
+    )");
+    check(guarded.x == 0 && loose.x == 0 && live.x == 2, "no native code ran with an expired receiver");
+    check(lua_gettop(L) == 0, "the expired guard keeps the stack balanced");
+}
+
 void late_and_changed_bases() {
     state vm;
     binder lua(vm);
@@ -694,6 +738,7 @@ int main() {
         instance_fields();
         ownership();
         pins_and_invalidation();
+        expired_guard();
         late_and_changed_bases();
         operators();
         typed_bridge_and_foreign_values();

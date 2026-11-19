@@ -147,6 +147,7 @@ lua.invalidate_named_object(sprite, "cc.Node");    // native 소멸 통지
 - **소유권**은 래퍼마다 정합니다. 기본은 native 소유이며 GC는 래퍼만 정리합니다. `own`은 Lua 소유로 바꿔 래퍼 수거나 VM 종료 시 collector를 한 번 실행하고, `disown`은 되돌립니다.
 - `pin(L, index)`은 native가 소유한 객체의 래퍼와 필드를 `unpin(L, pointer, type)` 또는 만료까지 유지합니다. Lua 변수가 없어도 객체에 붙인 필드·콜백이 사라지지 않습니다. 동일성과 마찬가지로 계층 단위로 관리하며 `type`에는 계층의 어느 클래스 이름이든 쓸 수 있습니다.
 - `invalidate(L, pointer, type)`(`binder::invalidate_named_object`)는 native 소멸 통지입니다. 계층의 어느 클래스 이름으로도 래퍼를 찾으며, 포인터·필드·pin·소유권을 정리하고 collector는 실행하지 않습니다. 이후 같은 주소의 객체는 새 래퍼를 받습니다. 만료된 래퍼의 필드 조회는 nil, 멤버 조회는 그대로 동작하므로 raw 함수가 `pointer()`의 nullptr를 검사해야 합니다.
+- 만료 검사가 없는 기존 raw 함수에는 클래스 등록에서 `enable_expired_guard()`를 설정합니다. 만료된 객체에서 조회한 native 함수는 `expired native object` 오류를 내는 함수로 바뀌고, raw 변수와 숫자 키 접근도 같은 오류를 냅니다. 필드·상수·스크립트가 정의한 멤버 조회는 그대로이며, 자식 클래스는 가장 가까운 설정을 따릅니다.
 
 등록 API(`named_class`)는 다른 등록 API처럼 `arky::error`를 던집니다. `named_object` 함수는 raw 콜백 안에서 쓰도록 C++ 예외를 던지지 않으며 실패를 반환값으로 알립니다. 다른 Lua API처럼 메모리를 할당하는 호출은 메모리 부족 오류를 낼 수 있습니다. `pointer`·`type_name`·`own`·`disown`·`unpin`과 등록된 타입에 대한 `invalidate`는 할당하지 않으므로 보호 호출 밖의 소멸자에서도 사용할 수 있습니다. 모든 호출은 VM의 스레드에서 수행합니다.
 

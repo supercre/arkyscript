@@ -29,6 +29,7 @@ inline char named_collector_key;
 inline char named_natives_key;   // member table: values a script replaced through the class table
 inline char named_operators_key; // member table: operators registered on this class
 inline char named_derived_key;   // member table: true once another class names it as its base
+inline char named_guard_key;     // member table: whether expired objects refuse native calls
 inline constexpr const char* const named_operator_events[] = {
     "__add", "__sub", "__mul", "__div", "__mod", "__pow", "__unm",
     "__concat", "__len", "__lt", "__le", "__eq", "__call"};
@@ -107,9 +108,33 @@ inline named_storage* named_box(lua_State* L, int index) {
     return named ? static_cast<named_storage*>(lua_touserdata(L, index)) : nullptr;
 }
 
+// The receiver of an object metamethod is a wrapper unless a script moved the
+// metatable to another userdata; the size check keeps that case memory-safe.
+inline bool named_expired(lua_State* L) {
+    return lua_objlen(L, 1) == sizeof(named_storage) && !static_cast<named_storage*>(lua_touserdata(L, 1))->value;
+}
+// The nearest class with an explicit setting decides. Only expired objects ask.
+inline bool named_guarded(lua_State* L) {
+    bool guarded = false;
+    lua_pushvalue(L, lua_upvalueindex(1));
+    while (true) {
+        lua_pushlightuserdata(L, &named_guard_key);
+        lua_rawget(L, -2);
+        const bool configured = !lua_isnil(L, -1);
+        if (configured) guarded = lua_toboolean(L, -1) != 0;
+        lua_pop(L, 1);
+        if (configured || !lua_getmetatable(L, -1)) break;
+        lua_remove(L, -2);
+    }
+    lua_pop(L, 1);
+    return guarded;
+}
+inline int named_expired_call(lua_State* L) { return luaL_error(L, "expired native object"); }
+
 // Dispatchers follow the Lua C API convention and hold no C++ resources.
 inline int named_index(lua_State* L) {
     const bool instance = lua_type(L, 1) == LUA_TUSERDATA;
+    const bool expired = instance && named_expired(L);
     if (instance) {
         // Instance fields shadow class members; the field table's metamethods apply.
         lua_getfenv(L, 1);
@@ -142,7 +167,12 @@ inline int named_index(lua_State* L) {
         } else {
             lua_pushvalue(L, 2);
             lua_rawget(L, -2);
-            if (!lua_isnil(L, -1)) return 1;
+            if (!lua_isnil(L, -1)) {
+                // A guarded class hands out a raising function in place of
+                // native code that would run with a dead receiver.
+                if (expired && lua_iscfunction(L, -1) && named_guarded(L)) lua_pushcfunction(L, named_expired_call);
+                return 1;
+            }
             lua_pop(L, 1);
             if (!instance && !class_table) lua_pushnil(L);
             else {
@@ -156,6 +186,7 @@ inline int named_index(lua_State* L) {
             }
         }
         if (!lua_isnil(L, -1)) {
+            if (expired && named_guarded(L)) return named_expired_call(L);
             lua_pushvalue(L, 1);
             lua_pushvalue(L, 2);
             lua_call(L, 2, 1);
@@ -226,6 +257,7 @@ inline int named_newindex(lua_State* L) {
             lua_remove(L, -2);
         }
         if (!lua_isnil(L, -1)) {
+            if (instance && named_expired(L) && named_guarded(L)) return named_expired_call(L);
             lua_pushvalue(L, 1);
             if (numeric) lua_pushvalue(L, 2);
             lua_pushvalue(L, 3);
@@ -576,6 +608,19 @@ public:
     named_class& reg_collector(lua_CFunction collector) {
         if (!collector) throw error("cannot register a null collector");
         hook(&detail::named_collector_key, collector);
+        return *this;
+    }
+    // For raw callbacks that do not check for an expired receiver. Once an
+    // object is invalidated, a native function looked up through it becomes
+    // one that raises "expired native object", and raw variables and number
+    // keys raise the same error. Instance fields, values and script-defined
+    // members stay readable. Derived classes use the nearest setting.
+    named_class& enable_expired_guard(bool enabled = true) {
+        detail::stack_guard stack(L_);
+        detail::reserve(L_, 6);
+        const int members = push_self();
+        lua_pushboolean(L_, enabled);
+        detail::named_set(L_, members, &detail::named_guard_key);
         return *this;
     }
     // Stores the public class table at a dotted global path.
