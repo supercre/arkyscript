@@ -279,6 +279,14 @@ void lua_owned_values() {
             kept = cc.Bounds:new()
         )");
         check(Bounds::live == 1, "a collected owner released its object");
+        // A static is called on its class; the first argument is never taken for it.
+        lua.dostring(R"lua(
+            local ok, message = pcall(cc.Bounds.new)
+            assert(not ok and message:find("called on a class", 1, true), message)
+            assert(not pcall(cc.Bounds.new, 1) and not pcall(cc.Bounds.new, {}) and not pcall(kept.new, kept))
+            assert(cc.Bounds.new(cc.Bounds) ~= nil and cc.Bounds.new(cc.Node) ~= nil)
+        )lua");
+        lua.dostring("kept = nil; collectgarbage('collect'); collectgarbage('collect'); kept = cc.Bounds:new()");
         // Classes can be reopened in typed form; registration stays open.
         lua.reg_named_class<Bounds>("cc.Bounds").reg_method("grow", [](Bounds& self, float by) { self.width += by; });
         lua.dostring("kept:grow(2); assert(kept.width == 2 and kept:grow(1) == nil)");
@@ -289,12 +297,124 @@ void lua_owned_values() {
     }
     check(Bounds::live == 0, "closing the VM released the remaining owner");
 }
+
+// A host that also registers classes by name only (as code written for raw
+// bindings does) keeps its own record of which C++ type each one stands for.
+struct Widget : Node {
+    const char* kind() const override { return "widget"; }
+};
+const char* widget_class = nullptr;
+const char* resolve(lua_State*, const std::type_info& type) noexcept {
+    return type == typeid(Widget) ? widget_class : nullptr;
+}
+// A class of the natively owned hierarchy can still hand single objects to
+// Lua: ownership releases the pin, so the collector runs.
+struct Request : Ref {
+    static inline int released = 0;
+};
+void owned_objects_of_a_pinned_hierarchy() {
+    Ref::live = 0;
+    Request::released = 0;
+    {
+        state vm;
+        binder lua(vm);
+        register_engine(lua);
+        lua_State* L = vm.get();
+        lua.reg_named_class<Request>("cc.Request")
+            .reg_base<Ref>()
+            .reg_collector(+[](lua_State* state) -> int {
+                delete static_cast<Request*>(named_object::pointer(state, 1));
+                ++Request::released;
+                return 0;
+            })
+            .reg_static("new", [] { return lua_owned<Request>{new Request}; })
+            .publish("cc.Request");
+        lua.dostring("local a = cc.Request:new(); assert(a:getId() > 0); a = nil; collectgarbage('collect'); collectgarbage('collect')");
+        check(Request::released == 1 && Ref::live == 0, "an owned object of a pinned hierarchy is collected");
+        // The same through the raw interface: expose, then take ownership.
+        auto* request = new Request;
+        check(named_object::push(L, request, "cc.Request") && named_object::own(L, -1) && !named_object::own(L, -1),
+              "ownership is taken once");
+        lua_pop(L, 1);
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        check(Request::released == 2 && Ref::live == 0, "taking ownership releases the pin");
+        // Without ownership the wrapper stays for the native owner.
+        auto* kept = new Request;
+        check(named_object::push(L, kept, "cc.Request"), "expose a natively owned object");
+        lua_pop(L, 1);
+        lua_gc(L, LUA_GCCOLLECT, 0);
+        check(Request::released == 2 && Ref::live == 1, "a natively owned object is not collected");
+        lua.invalidate_named_object(kept, "cc.Ref");
+        delete kept;
+    }
+    check(Request::released == 2 && Ref::live == 0, "nothing is released twice");
+}
+void classes_bound_by_name() {
+    Ref::live = 0;
+    std::vector<Ref*> created;
+    {
+        state vm;
+        binder lua(vm);
+        register_engine(lua);
+        lua_State* L = vm.get();
+        lua.reg_named_class("ext.Widget").reg_base("cc.Node")
+            .reg_raw_method("isWidget", +[](lua_State* state) -> int { lua_pushboolean(state, true); return 1; });
+        auto* widget = new Widget;
+        created.push_back(widget);
+        check(named_class::of_type(L, typeid(Sprite)) == std::string_view("cc.Sprite"), "a typed class answers for its C++ type");
+        check(!named_class::of_type(L, typeid(Widget)), "a type nobody bound has no class");
+        check(named_object::push(L, static_cast<Node*>(widget)) && std::string_view(named_object::type_name(L, -1)) == "cc.Node",
+              "without a resolver the object is exposed as its bound base");
+        lua_pop(L, 1);
+        lua.invalidate_named_object(widget, "cc.Ref");
+
+        named_class::reg_type_resolver(L, resolve);
+        check(!named_class::of_type(L, typeid(Widget)), "the resolver may decline");
+        widget_class = "ext.Missing";
+        check(!named_class::of_type(L, typeid(Widget)), "an unregistered name is no class");
+        widget_class = "ext.Widget";
+        check(named_class::of_type(L, typeid(Widget)) == std::string_view("ext.Widget"), "the resolver names the class of a type");
+        auto* parent = Node::create();
+        created.push_back(parent);
+        parent->addChild(widget);
+        check(named_object::push(L, parent), "expose the parent");
+        lua_setglobal(L, "parent");
+        // The typed getter returns Node*; the object arrives as its own class.
+        lua.dostring(R"lua(
+            local child = parent:getChild(0)
+            assert(child:isWidget() and child:kind() == 'widget' and child:getParent() == parent)
+            assert(parent:addChild(child, 2) == parent)       -- accepted where a Node is expected
+        )lua");
+        check(named_object::push(L, static_cast<Ref*>(widget)) && std::string_view(named_object::type_name(L, -1)) == "ext.Widget",
+              "every bound base resolves to the same class");
+        lua_pop(L, 1);
+        named_class::reg_type_resolver(L, nullptr);
+        check(!named_class::of_type(L, typeid(Widget)), "the resolver can be removed");
+        // One class may stand for a second C++ type: both convert as arguments.
+        lua.reg_named_class<Widget>("cc.Sprite");
+        auto* second = new Widget;
+        created.push_back(second);
+        check(named_object::push(L, second) && std::string_view(named_object::type_name(L, -1)) == "cc.Sprite",
+              "a second type bound to a class is exposed as that class");
+        lua_setglobal(L, "second");
+        lua.reg_named_class<Node>("cc.Node")
+            .reg_method("takesWidget", [](Node*, Widget* widget) { return widget != nullptr; })
+            .reg_method("takesSprite", [](Node*, Sprite* sprite) { return sprite != nullptr; });
+        lua.dostring("assert(parent:takesWidget(second) and parent:takesSprite(second) and not pcall(parent.takesWidget, parent, parent))");
+        for (Ref* ref : created) lua.invalidate_named_object(ref, "cc.Ref");
+    }
+    for (Ref* ref : created) delete ref;
+    check(Ref::live == 0, "the host released its objects");
+}
 } // namespace
 
 int main() {
     try {
         registration_in_sample_form();
         lua_owned_values();
+        owned_objects_of_a_pinned_hierarchy();
+        classes_bound_by_name();
         std::cout << "named_typed: " << checks << " checks passed\n";
     } catch (const std::exception& exception) {
         std::cerr << exception.what() << '\n';
