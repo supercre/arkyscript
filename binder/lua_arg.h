@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-namespace next2::luax {
+namespace arky {
 // Specialize for a C++ value type before its first binding use. read returns T
 // by value without changing the stack; push appends exactly one Lua value.
 // Converters may use carg/pusher recursively and throw C++ exceptions on error.
@@ -557,4 +557,4 @@ template<class T> struct pusher {
 template<class T> struct result {
     static void push_im(lua_State* L, T value) { pusher<T>::push(L, std::forward<T>(value)); }
 };
-} // namespace next2::luax
+} // namespace arky

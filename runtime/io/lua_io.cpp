@@ -28,7 +28,7 @@
 namespace {
 using clock_type = std::chrono::steady_clock;
 using deadline_type = clock_type::time_point;
-using next2::luax::error;
+using arky::error;
 constexpr const char* owner_type = "tynex.io.owner";
 constexpr const char* request_type = "tynex.io.request";
 constexpr const char* socket_type = "tynex.io.socket";
@@ -59,7 +59,7 @@ std::string socket_message(const char* action, int code) {
 }
 
 struct owner_state {
-    std::unique_ptr<next2::luax::task_pool> pool;
+    std::unique_ptr<arky::task_pool> pool;
     std::size_t outstanding = 0;
     std::size_t sockets = 0;
 #if defined(_WIN32)
@@ -70,8 +70,8 @@ struct owner_state {
     }
     ~owner_state() { pool.reset(); WSACleanup(); }
 #endif
-    next2::luax::task_pool& workers() {
-        if (!pool) pool = std::make_unique<next2::luax::task_pool>(next2::luax::task_pool::default_workers(), request_limit);
+    arky::task_pool& workers() {
+        if (!pool) pool = std::make_unique<arky::task_pool>(arky::task_pool::default_workers(), request_limit);
         return *pool;
     }
 };
@@ -118,8 +118,8 @@ struct request {
     operation kind;
     outcome status = outcome::pending;
     deadline_type deadline;
-    std::optional<next2::luax::task<std::string>> file_work;
-    std::optional<next2::luax::task<addresses>> dns_work;
+    std::optional<arky::task<std::string>> file_work;
+    std::optional<arky::task<addresses>> dns_work;
     std::shared_ptr<socket_state> socket;
     addresses candidates;
     std::size_t candidate = 0;
@@ -255,8 +255,8 @@ std::size_t integer_arg(lua_State* L, int index, std::size_t minimum, std::size_
 deadline_type deadline_arg(lua_State* L, int index) {
     return clock_type::now() + std::chrono::milliseconds(integer_arg(L, index, 0, 2147483647, "timeout_ms", 30000));
 }
-void checkpoint(const next2::luax::cancellation_token& stop, deadline_type deadline) {
-    if (stop.stop_requested()) throw next2::luax::task_cancelled();
+void checkpoint(const arky::cancellation_token& stop, deadline_type deadline) {
+    if (stop.stop_requested()) throw arky::task_cancelled();
     if (clock_type::now() >= deadline) throw error("I/O operation timed out");
 }
 
@@ -280,7 +280,7 @@ struct file_descriptor {
 };
 #endif
 std::string load_file(const std::string& path, std::size_t maximum, deadline_type deadline,
-                      const next2::luax::cancellation_token& stop) {
+                      const arky::cancellation_token& stop) {
     checkpoint(stop, deadline);
     file_descriptor file;
     std::uint64_t size = 0;
@@ -331,7 +331,7 @@ std::string load_file(const std::string& path, std::size_t maximum, deadline_typ
 }
 
 addresses resolve(const std::string& host, int port, deadline_type deadline,
-                  const next2::luax::cancellation_token& stop) {
+                  const arky::cancellation_token& stop) {
     checkpoint(stop, deadline);
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
@@ -500,7 +500,7 @@ int read_file(lua_State* L) {
     auto state = owner(L);
     auto work = std::make_shared<request>(state, operation::file, deadline);
     if (clock_type::now() >= deadline) work->fail("I/O operation timed out");
-    else work->file_work.emplace(state->workers().submit([path = std::move(path), maximum, deadline](next2::luax::cancellation_token stop) {
+    else work->file_work.emplace(state->workers().submit([path = std::move(path), maximum, deadline](arky::cancellation_token stop) {
         return load_file(path, maximum, deadline, stop);
     }));
     push_box(L, std::move(work), request_type);
@@ -515,7 +515,7 @@ int connect(lua_State* L) {
     auto work = std::make_shared<request>(state, operation::connect, deadline);
     work->socket = std::make_shared<socket_state>(state);
     if (clock_type::now() >= deadline) work->fail("I/O operation timed out");
-    else work->dns_work.emplace(state->workers().submit([host = std::move(host), port, deadline](next2::luax::cancellation_token stop) {
+    else work->dns_work.emplace(state->workers().submit([host = std::move(host), port, deadline](arky::cancellation_token stop) {
         return resolve(host, static_cast<int>(port), deadline, stop);
     }));
     push_box(L, std::move(work), request_type);
@@ -608,12 +608,12 @@ template<class T> int collect(lua_State* L) {
     return 0;
 }
 template<auto F> void method(lua_State* L, const char* name) {
-    lua_pushcfunction(L, (next2::luax::detail::boundary<F>));
+    lua_pushcfunction(L, (arky::detail::boundary<F>));
     lua_setfield(L, -2, name);
 }
 template<auto F> void module_function(lua_State* L, const char* name, int state) {
     lua_pushvalue(L, state);
-    lua_pushcclosure(L, next2::luax::detail::boundary<F>, 1);
+    lua_pushcclosure(L, arky::detail::boundary<F>, 1);
     lua_setfield(L, -2, name);
 }
 template<class T> void metatable(lua_State* L, const char* name) {
@@ -648,5 +648,5 @@ int open_module(lua_State* L) {
 #define TYNEX_IO_EXPORT __attribute__((visibility("default")))
 #endif
 extern "C" TYNEX_IO_EXPORT int luaopen_tynex_io(lua_State* L) {
-    return next2::luax::detail::boundary<open_module>(L);
+    return arky::detail::boundary<open_module>(L);
 }

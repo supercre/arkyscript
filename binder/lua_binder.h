@@ -5,7 +5,7 @@
 #include "lua_class.h"
 #include "lua_value.h"
 
-namespace next2::luax {
+namespace arky {
 
 class binder {
 public:
@@ -98,4 +98,4 @@ private:
     lua_State* L_;
     std::string namespace_;
 };
-} // namespace next2::luax
+} // namespace arky

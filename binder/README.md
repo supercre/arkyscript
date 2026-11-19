@@ -1,8 +1,8 @@
-# Tynex Binder
+# Arky Binder
 
-Tynex 개발 키트의 헤더 전용 C++20 바인딩 모듈입니다. 공개 네임스페이스는 `next2::luax::`, 헤더 경로는 `binder/`입니다. 함수·클래스 등록, 타입 변환, Lua 객체 참조, 스크립트 실행을 제공합니다. 현재 LuaJIT의 공개 C API를 사용하며 C++20 표준 라이브러리와 LuaJIT 헤더·라이브러리만 필요합니다. 다른 Lua 버전은 호환 계층과 별도 검증이 필요합니다.
+Tynex 개발 키트의 헤더 전용 C++20 바인딩 모듈입니다. 공개 네임스페이스는 `arky::`, 헤더 경로는 `binder/`입니다. 함수·클래스 등록, 타입 변환, Lua 객체 참조, 스크립트 실행을 제공합니다. 현재 LuaJIT의 공개 C API를 사용하며 C++20 표준 라이브러리와 LuaJIT 헤더·라이브러리만 필요합니다. 다른 Lua 버전은 호환 계층과 별도 검증이 필요합니다.
 
-`next2`는 “next to …”, 즉 “…의 곁에”라는 뜻이고, `luax`는 그 아래의 Lua 모듈을 구분합니다. API는 `next2::luax::binder`처럼 네임스페이스를 명시해 사용합니다.
+API는 `arky::binder`, `arky::state`, `arky::converter<T>`처럼 네임스페이스를 명시해 사용합니다. 기존 네임스페이스를 사용한 코드와 변환기 특수화도 `arky`로 옮겨야 합니다.
 
 ## 구성
 
@@ -31,8 +31,8 @@ struct Counter {
     int get() const noexcept { return value; }
 };
 
-next2::luax::state vm;
-next2::luax::binder lua(vm);
+arky::state vm;
+arky::binder lua(vm);
 lua.reg_func("sum", [](int a, int b) { return a + b; });
 lua.reg_class<Counter>("Counter")
     .reg_con<int>()
@@ -43,7 +43,7 @@ lua.dostring("counter = Counter(20); counter:add(22); assert(counter.total == 42
 int result = lua.call<int>("sum", 20, 22);
 ```
 
-완전한 실행 예제는 [cpp_binder.cpp](../examples/cpp_binder.cpp)에 있습니다. 기존 VM에는 `next2::luax::binder lua(existing_state);`로 연결합니다. 이 생성자는 라이브러리를 열거나 VM 소유권을 가져오지 않습니다. `state`는 VM을 만들고 닫으며 기본적으로 LuaJIT 표준 라이브러리를 엽니다. 라이브러리를 직접 구성하려면 `state vm(false)`를 사용합니다.
+완전한 실행 예제는 [cpp_binder.cpp](../examples/cpp_binder.cpp)에 있습니다. 기존 VM에는 `arky::binder lua(existing_state);`로 연결합니다. 이 생성자는 라이브러리를 열거나 VM 소유권을 가져오지 않습니다. `state`는 VM을 만들고 닫으며 기본적으로 LuaJIT 표준 라이브러리를 엽니다. 라이브러리를 직접 구성하려면 `state vm(false)`를 사용합니다.
 
 [클래스 예제](../examples/cpp_class.cpp)는 생성자·메서드·프로퍼티·예외 처리를, [공통 동작 예제](../examples/cpp_traits.cpp)는 C++20 concept과 템플릿을 통한 바인딩 재사용을 보여줍니다. `make binder-examples`로 세 예제를 실행할 수 있습니다. 후자는 C++ 기능이며 Arky 스크립트의 `trait` 키워드와 구분합니다.
 
@@ -102,17 +102,17 @@ lua.reg_class<Node>("Node")
 ```cpp
 #include "binder/lua_arg.h"
 
-next2::luax::pusher<int>::push(L, 42);          // 값 하나를 스택에 추가
-int value = next2::luax::carg<int>(L, -1).to(); // 읽기; 스택 유지
+arky::pusher<int>::push(L, 42);          // 값 하나를 스택에 추가
+int value = arky::carg<int>(L, -1).to(); // 읽기; 스택 유지
 lua_pop(L, 1);
 
-next2::luax::result<std::vector<int>>::push_im(L, {10, 20, 30});
-next2::luax::carg<const std::vector<int>&> numbers(L, -1);
+arky::result<std::vector<int>>::push_im(L, {10, 20, 30});
+arky::carg<const std::vector<int>&> numbers(L, -1);
 const auto& values = numbers.to();          // numbers가 변환한 배열의 수명을 소유
 lua_pop(L, 1);
 ```
 
-`carg`는 생성 시 변환하며, 변환한 문자열·배열의 const 참조는 `carg` 객체가 살아 있는 동안 유효합니다. 등록된 클래스 참조·포인터는 대상 객체를 빌리므로 호스트에서 수명을 유지해야 합니다. 변환 오류는 `next2::luax::error`로 전달합니다. 숫자·문자열·컨테이너의 변경 가능한 참조 인자는 지원하지 않고, 클래스의 변경 가능한 참조만 지원합니다.
+`carg`는 생성 시 변환하며, 변환한 문자열·배열의 const 참조는 `carg` 객체가 살아 있는 동안 유효합니다. 등록된 클래스 참조·포인터는 대상 객체를 빌리므로 호스트에서 수명을 유지해야 합니다. 변환 오류는 `arky::error`로 전달합니다. 숫자·문자열·컨테이너의 변경 가능한 참조 인자는 지원하지 않고, 클래스의 변경 가능한 참조만 지원합니다.
 
 `std::vector<T>`는 **키가 1부터 N까지 연속인 Lua 배열**로 변환합니다. 중첩 배열과 `vector<bool>`을 지원하며, 읽는 순서는 숫자 인덱스 순서입니다. 구멍이 있는 배열·문자열 키가 섞인 테이블은 오류입니다. nil 요소는 배열에서 사라지므로 vector의 nil 요소 push도 오류로 처리합니다. 빈 vector도 정확히 테이블 하나만 push하며, 변환이 실패하면 스택을 복구합니다.
 
@@ -128,7 +128,7 @@ lua_pop(L, 1);
 | `ref_ownership::lua` | 새 래퍼마다 `addRef` 한 번 | 래퍼마다 `decRef` 한 번 | 먼저 소멸했다면 통지로 남은 해제 취소 |
 
 ```cpp
-using namespace next2::luax;
+using namespace arky;
 
 lua.reg_class<Ref>("Ref");
 lua.reg_ref_object(arky_ref_object<Ref>{
@@ -171,13 +171,13 @@ Yuna는 `RefDestroyTrigger::registerDestroyDelegate`와 `unRegisterDestroyDelega
 
 ## 사용자 정의 타입 변환
 
-`next2::luax::converter<T>`를 특수화하면 외부 라이브러리의 값 타입을 Lua 값으로 변환할 수 있습니다. 좌표 구조체, 시간 단위, 문자열로 표현하는 enum 등이 대상입니다. 엔진 헤더나 `detail` 네임스페이스에 의존하지 않고 호스트 측 헤더에서 정의합니다.
+`arky::converter<T>`를 특수화하면 외부 라이브러리의 값 타입을 Lua 값으로 변환할 수 있습니다. 좌표 구조체, 시간 단위, 문자열로 표현하는 enum 등이 대상입니다. 엔진 헤더나 `detail` 네임스페이스에 의존하지 않고 호스트 측 헤더에서 정의합니다.
 
 ```cpp
 #include "binder/lua_binder.h"
 #include <chrono>
 
-namespace next2::luax {
+namespace arky {
 template<> struct converter<std::chrono::milliseconds> {
     static constexpr bool enabled = true;
     static std::chrono::milliseconds read(lua_State* L, int index) {
@@ -190,7 +190,7 @@ template<> struct converter<std::chrono::milliseconds> {
 }
 
 // 기존 VM에도 연결할 수 있습니다.
-next2::luax::binder lua(existing_state);
+arky::binder lua(existing_state);
 lua.reg_func("delay_ms", [](std::chrono::milliseconds delay) { return delay; });
 lua.dostring("assert(delay_ms(250) == 250)");
 ```
@@ -199,7 +199,7 @@ lua.dostring("assert(delay_ms(250) == 250)");
 - `read`는 `T`를 값으로 반환합니다. 바인더는 일반 스택의 음수 인덱스를 절대 인덱스로 바꾸어 전달합니다. Lua 스택의 기존 값과 높이를 유지해야 합니다.
 - `push`는 Lua 값 하나를 추가합니다. 여러 반환값은 이 API의 범위가 아닙니다. const 참조나 값 인자로 받고 필요하면 이동 인자용 오버로드를 추가할 수 있습니다.
 - 임시 값을 추가하다 C++ 예외가 발생하면 바인더가 임시 스택 항목을 제거합니다. 정상 반환 시에도 스택 높이 규약 위반을 검사합니다. 기존 항목을 제거·교체하거나 Lua 테이블을 수정한 결과까지 복구하지는 않습니다.
-- 오류에는 `next2::luax::error` 등 C++ 예외를 사용합니다. C++ 자원이 살아 있는 동안 `lua_error`·`luaL_check*` 등으로 직접 longjmp하지 않습니다. Lua 메타메서드를 실행할 때도 보호 호출이 필요합니다.
+- 오류에는 `arky::error` 등 C++ 예외를 사용합니다. C++ 자원이 살아 있는 동안 `lua_error`·`luaL_check*` 등으로 직접 longjmp하지 않습니다. Lua 메타메서드를 실행할 때도 보호 호출이 필요합니다.
 - 함수 인자·결과, 프로퍼티, `carg`·`pusher`, `object` 접근과 `optional<T>`·`vector<T>` 내부에서 같은 변환을 사용합니다. const 참조 인자는 변환된 값을 호출 동안 보관합니다. 변경 가능한 `T&`는 지원하지 않습니다.
 - 변환을 정의한 타입은 값으로 다루므로 `reg_class<T>`로 함께 등록하지 않습니다. 포인터 수명과 객체 동일성은 `arky_ref_object<T>` 정책을 사용합니다. 기존 외부 userdata 해석은 후속 범위입니다.
 
@@ -207,7 +207,7 @@ lua.dostring("assert(delay_ms(250) == 250)");
 
 ## 동적 값
 
-`next2::luax::value`는 Lua 값을 C++ 표준 타입으로 표현하는 재귀 구조체입니다. 공개 `data` 멤버의 `std::variant`가 현재 값과 타입을 보관합니다.
+`arky::value`는 Lua 값을 C++ 표준 타입으로 표현하는 재귀 구조체입니다. 공개 `data` 멤버의 `std::variant`가 현재 값과 타입을 보관합니다.
 
 - 값 저장소: `std::variant<std::monostate, bool, int64_t, uint64_t, double, std::string, array, table, object>`
 - 배열: `value::array` = `std::vector<value>`
@@ -215,7 +215,7 @@ lua.dostring("assert(delay_ms(250) == 250)");
 - 키: `std::variant<int64_t, std::string, bool>`
 
 ```cpp
-using next2::luax::value;
+using arky::value;
 value config = value::table{
     {"name", "demo"},
     {"enabled", true},
@@ -244,7 +244,7 @@ lua.dostring(R"(
     function config.sum(a, b) return a + b end
     function config:add(n) self.score = self.score + n; return self.score end
 )");
-auto config = lua.get_var<next2::luax::object>("config");
+auto config = lua.get_var<arky::object>("config");
 auto title = config["child"].get_var<std::string>("title");
 config.set_var("score", 30);
 int sum = config.call<int>("sum", 20, 22);       // config.sum(20, 22)
@@ -252,7 +252,7 @@ int score = config.call_method<int>("add", 12); // config:add(12), self 전달
 int direct = config["sum"].invoke<int>(20, 22); // 함수 handle 직접 호출
 ```
 
-`object(lua_State*, index)`로 직접 캡처하거나 바인더 인자·반환값으로 전달할 수 있습니다. `as<T>()`는 handle이 보유한 값을 변환합니다. `get_var`·`set_var`는 Lua 메타메서드를 지원하고, 오류는 보호 호출을 통해 `next2::luax::error`로 전달합니다. `call`은 암묵적인 self를 전달하지 않으며, Lua colon 메서드와 바인딩된 C++ 메서드에는 `call_method`를 사용합니다.
+`object(lua_State*, index)`로 직접 캡처하거나 바인더 인자·반환값으로 전달할 수 있습니다. `as<T>()`는 handle이 보유한 값을 변환합니다. `get_var`·`set_var`는 Lua 메타메서드를 지원하고, 오류는 보호 호출을 통해 `arky::error`로 전달합니다. `call`은 암묵적인 self를 전달하지 않으며, Lua colon 메서드와 바인딩된 C++ 메서드에는 `call_method`를 사용합니다.
 
 `validate()`는 살아 있는 VM에 속한 nil 이외의 값이면 true입니다. false 값도 유효한 객체입니다. 비어 있거나 종료된 VM의 객체 접근은 오류로 처리합니다. handle은 VM 자체를 소유하지 않으며, `state` 소멸 및 외부 코드의 `lua_close` 이후에는 자동 무효화되어 해제 시 닫힌 VM에 접근하지 않습니다. 코루틴에서 만든 handle은 그 코루틴도 참조하고, 같은 VM의 다른 코루틴으로 전달할 수 있습니다. 서로 다른 VM 사이의 전달은 거부합니다.
 
@@ -261,8 +261,8 @@ int direct = config["sum"].invoke<int>(20, 22); // 함수 handle 직접 호출
 ```cpp
 #include "binder/lua_class.h"
 
-next2::luax::state vm;
-next2::luax::cpp_class<Counter>(vm.get(), "Counter")
+arky::state vm;
+arky::cpp_class<Counter>(vm.get(), "Counter")
     .reg_con<int>()
     .reg_func("add", &Counter::add)
     .reg_var("value", &Counter::value);
@@ -278,7 +278,7 @@ Lua 생성자로 만든 객체, C++에서 값으로 전달한 객체, 클래스 
 
 `binder`와 `cpp_class`보다 VM이 오래 살아 있어야 하며, 같은 VM에 대한 접근은 호스트에서 직렬화해야 합니다. Lua GC로 삭제되는 C++ 객체·캡처의 소멸자는 예외를 던지면 안 됩니다.
 
-일반 Lua 실행 오류, 타입 오류와 C++ 예외는 `next2::luax::error` 또는 Lua의 `pcall`로 처리할 수 있습니다. 호스트 API는 성공·실패 모두 기존 스택 높이를 복구합니다. 콜백의 C++ 예외는 C++ 지역 객체를 정리한 뒤 Lua 오류로 전환합니다. 메시지는 최대 1023바이트로 제한합니다. typed 콜백에서 직접 `lua_error`를 호출하지 말고 C++ 예외를 던지세요. raw C 콜백은 Lua C API의 수명·오류 처리 규칙을 직접 지켜야 합니다. 메모리 부족 등 Lua API 자체 오류의 C++ unwind 동작은 사용한 LuaJIT 빌드에 따릅니다.
+일반 Lua 실행 오류, 타입 오류와 C++ 예외는 `arky::error` 또는 Lua의 `pcall`로 처리할 수 있습니다. 호스트 API는 성공·실패 모두 기존 스택 높이를 복구합니다. 콜백의 C++ 예외는 C++ 지역 객체를 정리한 뒤 Lua 오류로 전환합니다. 메시지는 최대 1023바이트로 제한합니다. typed 콜백에서 직접 `lua_error`를 호출하지 말고 C++ 예외를 던지세요. raw C 콜백은 Lua C API의 수명·오류 처리 규칙을 직접 지켜야 합니다. 메모리 부족 등 Lua API 자체 오류의 C++ unwind 동작은 사용한 LuaJIT 빌드에 따릅니다.
 
 ## 빌드·검증
 

@@ -2,9 +2,9 @@
 #include "binder/lua_arg.h"
 #include <iostream>
 
-using next2::luax::carg;
-using next2::luax::pusher;
-using next2::luax::result;
+using arky::carg;
+using arky::pusher;
+using arky::result;
 
 namespace {
 int checks = 0;
@@ -14,11 +14,11 @@ void check(bool condition, const char* message) {
 }
 template<class F> void fails(F&& action, std::string_view expected) {
     try { action(); }
-    catch (const next2::luax::error& exception) {
+    catch (const arky::error& exception) {
         check(std::string_view(exception.what()).find(expected) != std::string_view::npos, exception.what());
         return;
     }
-    throw std::runtime_error("expected next2::luax::error");
+    throw std::runtime_error("expected arky::error");
 }
 }
 

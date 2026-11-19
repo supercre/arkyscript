@@ -1,10 +1,10 @@
 #include "binder/lua_binder.h"
 #include <iostream>
 
-using next2::luax::binder;
-using next2::luax::error;
-using next2::luax::object;
-using next2::luax::state;
+using arky::binder;
+using arky::error;
+using arky::object;
+using arky::state;
 
 namespace {
 int checks = 0;
@@ -18,7 +18,7 @@ template<class F> void fails(F&& action, std::string_view expected) {
         check(std::string_view(exception.what()).find(expected) != std::string_view::npos, exception.what());
         return;
     }
-    throw std::runtime_error("expected next2::luax::error");
+    throw std::runtime_error("expected arky::error");
 }
 int echo(lua_State* L) { return lua_gettop(L); }
 int echo_noexcept(lua_State* L) noexcept { return lua_gettop(L); }

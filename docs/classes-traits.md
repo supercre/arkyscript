@@ -1,6 +1,6 @@
 # 스크립트 class·trait
 
-독립 Rust 컴파일러가 `.arky`의 class·trait를 검사하고 일반 Lua 테이블·메서드로 변환한다. 공식 LuaJIT 소스와 `.lua` legacy 로더는 변경하지 않는다. C++ `next2::luax` 바인더와 별도로 사용하는 스크립트 기능이다.
+독립 Rust 컴파일러가 `.arky`의 class·trait를 검사하고 일반 Lua 테이블·메서드로 변환한다. 공식 LuaJIT 소스와 `.lua` legacy 로더는 변경하지 않는다. C++ `arky` 바인더와 별도로 사용하는 스크립트 기능이다.
 
 ## 클래스
 

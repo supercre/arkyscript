@@ -21,10 +21,10 @@ void* allocate_with_failure(void* opaque, void* pointer, std::size_t old_size, s
 void allocation_failures() {
     int injected = 0;
     for (int fail_at = 1; fail_at <= 50; ++fail_at) {
-        next2::luax::state vm;
+        arky::state vm;
         lua_State* L = vm.get();
         lua_pushcfunction(L, luaopen_tynex_io);
-        if (lua_pcall(L, 0, 1, 0)) throw next2::luax::error(lua_tostring(L, -1));
+        if (lua_pcall(L, 0, 1, 0)) throw arky::error(lua_tostring(L, -1));
         lua_setglobal(L, "native_io");
         lua_getglobal(L, "native_io");
         lua_getfield(L, -1, "read_file");
@@ -52,20 +52,20 @@ int main() {
     try {
         allocation_failures();
         {
-            next2::luax::state vm;
+            arky::state vm;
             lua_pushcfunction(vm.get(), luaopen_tynex_io);
-            if (lua_pcall(vm.get(), 0, 1, 0)) throw next2::luax::error(lua_tostring(vm.get(), -1));
+            if (lua_pcall(vm.get(), 0, 1, 0)) throw arky::error(lua_tostring(vm.get(), -1));
             lua_setglobal(vm.get(), "native_io");
-            next2::luax::binder(vm).dofile("tests/io/runtime.lua");
+            arky::binder(vm).dofile("tests/io/runtime.lua");
         }
         // Teardown with live file and DNS jobs must cancel/join before native state
         // disappears; their jobs never retain a Lua state or a Lua reference.
         for (int i = 0; i < 10; ++i) {
-            next2::luax::state vm;
+            arky::state vm;
             lua_pushcfunction(vm.get(), luaopen_tynex_io);
-            if (lua_pcall(vm.get(), 0, 1, 0)) throw next2::luax::error(lua_tostring(vm.get(), -1));
+            if (lua_pcall(vm.get(), 0, 1, 0)) throw arky::error(lua_tostring(vm.get(), -1));
             lua_setglobal(vm.get(), "native_io");
-            next2::luax::binder(vm).dostring(R"(
+            arky::binder(vm).dostring(R"(
                 local pending = {}
                 for i = 1, 32 do
                     pending[#pending+1] = native_io.read_file('tests/io/runtime.lua')

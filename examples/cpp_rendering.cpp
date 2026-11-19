@@ -20,7 +20,7 @@ struct Sprite final : Node {
 struct Renderer {
     std::vector<std::shared_ptr<Node>> nodes;
     void add(std::shared_ptr<Node> node) {
-        if (!node) throw next2::luax::error("renderer requires a node");
+        if (!node) throw arky::error("renderer requires a node");
         nodes.push_back(std::move(node));
     }
     std::vector<DrawCommand> collect() const {
@@ -32,8 +32,8 @@ struct Renderer {
 
 int main(int argc, char** argv) {
     try {
-        next2::luax::state vm;
-        next2::luax::binder lua(vm);
+        arky::state vm;
+        arky::binder lua(vm);
         lua.reg_class<Node>("Node")
             .reg_var("x", &Node::x).reg_var("visible", &Node::visible)
             .reg_func("move", &Node::move);

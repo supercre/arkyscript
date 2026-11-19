@@ -1,7 +1,7 @@
 #include "binder/lua_binder.h"
 #include <iostream>
 
-using namespace next2::luax;
+using namespace arky;
 
 namespace {
 int checks = 0;

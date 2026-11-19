@@ -1,7 +1,7 @@
 #pragma once
 
 // Host-defined native object lifetime. No engine or shared_ptr dependency.
-namespace next2::luax {
+namespace arky {
 enum class ref_ownership { native, lua };
 
 // Register on a bound root class before exposing pointers or binding children.
@@ -13,4 +13,4 @@ template<class T> struct arky_ref_object {
     void (*decRef)(T*) noexcept = nullptr;
     ref_ownership ownership = ref_ownership::native;
 };
-} // namespace next2::luax
+} // namespace arky

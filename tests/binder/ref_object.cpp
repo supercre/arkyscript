@@ -3,7 +3,7 @@
 #include <iostream>
 #include <new>
 
-using namespace next2::luax;
+using namespace arky;
 
 namespace {
 int checks = 0;

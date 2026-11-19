@@ -2,11 +2,11 @@
 #include "binder/lua_binder.h"
 #include <iostream>
 
-using next2::luax::binder;
-using next2::luax::error;
-using next2::luax::object;
-using next2::luax::state;
-using next2::luax::value;
+using arky::binder;
+using arky::error;
+using arky::object;
+using arky::state;
+using arky::value;
 
 namespace {
 struct Native {
@@ -25,7 +25,7 @@ template<class F> void fails(F&& action, std::string_view expected) {
         check(std::string_view(exception.what()).find(expected) != std::string_view::npos, exception.what());
         return;
     }
-    throw std::runtime_error("expected next2::luax::error");
+    throw std::runtime_error("expected arky::error");
 }
 
 void standard_values(binder& lua) {

@@ -19,7 +19,7 @@ struct Widget {
 }
 
 // These adapters use only public binding APIs and the Lua C API.
-namespace next2::luax {
+namespace arky {
 template<> struct converter<sample::Point> {
     static constexpr bool enabled = true;
     static sample::Point read(lua_State* L, int index) {
@@ -88,7 +88,7 @@ template<> struct converter<sample::BrokenPush> {
 };
 }
 
-using namespace next2::luax;
+using namespace arky;
 namespace {
 int checks = 0;
 void check(bool condition, const char* message) {

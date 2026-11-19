@@ -1,7 +1,7 @@
 #include "binder/lua_binder.h"
 #include <iostream>
 
-using namespace next2::luax;
+using namespace arky;
 
 namespace sample {
 struct Pair { int first, second; };
@@ -9,7 +9,7 @@ struct Fault { int mode; };
 struct Native { int id = 42; };
 }
 
-namespace next2::luax {
+namespace arky {
 template<> struct converter<sample::Pair> {
     static constexpr bool enabled = true;
     static sample::Pair read(lua_State* L, int index) {

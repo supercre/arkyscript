@@ -4,11 +4,11 @@
 // Author: eugene.choi.
 #include "lua_cclosure.h"
 
-namespace next2::luax {
+namespace arky {
 enum class instance_field_policy { protect_native_members, allow_method_overrides };
 }
 
-namespace next2::luax::detail {
+namespace arky::detail {
 template<class T, class F, std::size_t... I> auto method(F function, std::index_sequence<I...>) {
     using traits = function_traits<F>;
     using self_type = std::conditional_t<traits::is_const, const T&, T&>;
@@ -385,9 +385,9 @@ template<class T> void create_class(lua_State* L) {
     lua_remove(L, meta); // leave only the public factory
 }
 
-} // namespace next2::luax::detail
+} // namespace arky::detail
 
-namespace next2::luax {
+namespace arky {
 template<class T> class cpp_class {
 public:
     cpp_class(lua_State* L, std::string_view name) : L_(L) {
@@ -566,4 +566,4 @@ private:
     lua_State* L_;
 };
 
-} // namespace next2::luax
+} // namespace arky

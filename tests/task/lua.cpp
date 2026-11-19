@@ -7,18 +7,18 @@
 int main() {
     try {
         {
-            next2::luax::state vm;
+            arky::state vm;
             lua_pushcfunction(vm.get(), luaopen_tynex_task);
-            if (lua_pcall(vm.get(), 0, 1, 0)) throw next2::luax::error(lua_tostring(vm.get(), -1));
+            if (lua_pcall(vm.get(), 0, 1, 0)) throw arky::error(lua_tostring(vm.get(), -1));
             lua_setglobal(vm.get(), "task");
-            next2::luax::binder(vm).dofile("tests/task/runtime.lua");
+            arky::binder(vm).dofile("tests/task/runtime.lua");
         }
         for (int i = 0; i < 20; ++i) {
-            next2::luax::state vm;
+            arky::state vm;
             lua_pushcfunction(vm.get(), luaopen_tynex_task);
-            if (lua_pcall(vm.get(), 0, 1, 0)) throw next2::luax::error(lua_tostring(vm.get(), -1));
+            if (lua_pcall(vm.get(), 0, 1, 0)) throw arky::error(lua_tostring(vm.get(), -1));
             lua_setglobal(vm.get(), "task");
-            next2::luax::binder(vm).dostring(R"(
+            arky::binder(vm).dostring(R"(
                 task.configure(2, 32)
                 for i = 1, 20 do
                     task.spawn(function(_, context)
