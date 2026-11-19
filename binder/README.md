@@ -12,6 +12,7 @@ API는 `arky::binder`, `arky::state`, `arky::converter<T>`처럼 네임스페이
 | `lua_arg.h` | 핵심 인자·결과 변환, `carg`·`pusher`·`result`, userdata 소유권 |
 | `lua_ref_object.h` | `arky_ref_object<T>`, native/Lua 소유권 정책 |
 | `lua_class.h` | `cpp_class<T>`, 생성자·메서드·멤버·프로퍼티 등록과 디스패치 |
+| `lua_named_class.h` | `named_class`·`named_object`, 이름으로 식별하는 클래스의 raw 등록과 객체 동일성·소유권·만료 |
 | `lua_cclosure.h` | 가변 인자 C++ 함수·람다를 Lua 콜백으로 연결 |
 | `lua_object.h` / `lua_object.inl` | registry 참조를 갖는 Lua 객체, 필드 접근·함수 호출 |
 | `lua_util.h` | `state`, 스택·오류 처리, VM 수명과 경로 유틸리티 |
@@ -93,7 +94,85 @@ lua.reg_class<Node>("Node")
 - 정책은 가장 가까운 부모 설정을 상속하며 자식에서 객체 노출 전에 명시적으로 바꿀 수 있습니다. 메서드 덮어쓰기는 인스턴스별 Lua 필드이므로 다른 객체나 클래스 등록을 바꾸지 않습니다.
 - Lua 필드는 userdata의 독립 환경에 보관합니다. 자기 자신을 캡처한 콜백도 registry에 고정하지 않아 GC로 수거할 수 있습니다. 참조 래퍼의 타입이 부모에서 자식으로 갱신되어도 필드는 유지됩니다.
 
-[호환 어댑터·인스턴스 필드 테스트](../tests/binder/compatibility.cpp)를 참고하세요. 외부 tolua userdata를 Arky 인자로 넘기는 변환은 별도 호스트 연결이 필요합니다.
+[호환 어댑터·인스턴스 필드 테스트](../tests/binder/compatibility.cpp)를 참고하세요. 타입 이름과 raw 함수로 작성한 기존 바인딩 전체를 옮길 때는 아래의 이름 기반 클래스를 사용합니다.
+
+## 이름으로 등록하는 네이티브 클래스
+
+`lua_named_class.h`는 C++ 타입 대신 **호스트가 정한 이름**으로 클래스를 식별합니다. 멤버는 Lua C 함수이고 객체는 타입 없는 포인터입니다. 생성기가 만든 raw 바인딩이나 기존 엔진 바인딩처럼 `"cc.Node"` 같은 이름과 `lua_CFunction`으로 작성한 코드를 그대로 받습니다. 클래스 등록·상속·멤버 조회·객체 동일성·소유권·만료를 바인더가 처리하므로 호스트 어댑터는 `detail` 네임스페이스나 별도 런타임 없이 공개 API만 사용합니다.
+
+```cpp
+int node_set_position(lua_State* L) {              // raw 콜백: 호출 중인 상태를 그대로 사용
+    auto* node = arky::named_object::is_a(L, 1, "cc.Node")
+        ? static_cast<Node*>(arky::named_object::pointer(L, 1)) : nullptr;
+    if (!node) return luaL_error(L, "expected a live cc.Node");
+    node->setPosition(luaL_checknumber(L, 2), luaL_checknumber(L, 3));
+    lua_settop(L, 1);
+    return 1;
+}
+
+arky::binder lua(existing_state);
+lua.reg_named_class("cc.Node")
+    .reg_raw_method("create", node_create)         // cc.Node.create()
+    .reg_raw_method("setPosition", node_set_position)
+    .reg_raw_var("name", node_get_name, node_set_name)
+    .publish("cc.Node");
+lua.reg_named_class("cc.Sprite").reg_base("cc.Node").publish("cc.Sprite");
+
+arky::named_object::push(L, sprite, "cc.Sprite");  // 같은 포인터는 같은 userdata
+lua.invalidate_named_object(sprite, "cc.Node");    // native 소멸 통지
+```
+
+### 클래스 등록
+
+- `reg_named_class(name)`은 처음 호출하면 클래스를 만들고 이후에는 같은 클래스를 다시 엽니다. 자식 클래스나 객체가 생긴 뒤에도 멤버를 추가·교체할 수 있고, 조회는 부모 사슬에서 가장 가까운 클래스의 멤버를 사용합니다. typed `reg_class<T>`의 등록 고정과 이름 충돌 검사는 적용하지 않습니다.
+- `reg_base(base)`는 멤버 상속과 타입 판정에 쓰는 부모 하나를 지정합니다. 아직 등록하지 않은 이름은 빈 클래스로 만들어 두고 나중에 채울 수 있습니다. 순환 관계는 오류입니다. 한 계층은 루트의 동일성 캐시를 공유하므로 객체를 노출하기 전에 부모를 등록합니다. 포인터를 보정하지 않으므로 한 계층의 모든 타입은 같은 주소로 객체를 가리켜야 합니다.
+- `reg_raw_method(name, fn)`은 `obj:name(...)`과 등록한 클래스의 `Class.name(...)`에 같은 함수를 연결합니다. `reg_value`는 상수를, `reg_method`는 typed callable을 등록합니다.
+- `reg_raw_var(name, getter, setter)`: 읽기는 `getter(receiver, name)`, 쓰기는 `setter(receiver, value)`입니다. receiver는 객체이며, `Class.name`으로 접근하면 클래스 테이블입니다. setter가 없으면 대입한 값은 인스턴스 필드가 됩니다. getter가 결과를 인스턴스 필드에 대입해 두면 다음 조회부터 그 필드를 사용합니다.
+- `reg_raw_index(getter)`·`reg_raw_newindex(setter)`는 숫자 키 `obj[i]`를 `getter(object, index)`·`setter(object, index, value)`로 처리합니다.
+- `reg_raw_operator("__eq", fn)`처럼 Lua 메타메서드 이름으로 연산자를 등록하며 자식 클래스가 상속합니다. 비교 연산자는 Lua 규칙에 따라 같은 클래스의 객체 사이에만 적용됩니다. `"__call"`은 `Class(...)` 호출도 받습니다.
+- `reg_collector(fn)`은 Lua가 소유한 객체를 해제하는 `fn(object)`를 등록합니다. 자식 클래스는 가장 가까운 collector를 사용합니다.
+
+### 멤버 테이블과 클래스 테이블
+
+- 클래스마다 **멤버 테이블** 하나가 있습니다. 모든 인스턴스와 클래스 테이블의 메타테이블이며 raw 항목이 곧 멤버입니다. `push_members()`로 얻어 테이블 기반 등록 코드가 함수를 직접 넣을 수 있습니다. `__index`·`__newindex`·`__gc`와 `reg_raw_operator`로 등록한 메타메서드는 바인더가 관리합니다.
+- `push_table()`·`publish(path)`의 **클래스 테이블**은 자기 클래스의 멤버만 읽습니다. 상속받은 멤버는 객체 또는 그 멤버를 정의한 클래스에서 접근합니다. typed 클래스의 팩토리와 같은 규칙입니다.
+- 스크립트가 클래스 테이블에 대입하면 해당 클래스와 자식의 모든 객체에 멤버가 추가·교체됩니다. 처음 교체된 값은 `push_native(name)`으로 다시 얻을 수 있습니다. 자기 클래스의 setter가 있는 이름은 `setter(class_table, value)`를 호출합니다.
+- `named_class::name_of(L, index)`는 클래스 테이블·멤버 테이블의 클래스 이름을, `named_class::derives(L, type, base)`는 클래스 사이의 관계를 알려 줍니다.
+
+### 객체
+
+- `named_object::push(L, pointer, type)`은 계층별 weak 캐시로 같은 포인터에 같은 userdata를 돌려줍니다. 부모 타입으로 먼저 노출한 래퍼는 자식 타입을 요청하면 그 타입으로 바뀌고, 부모 타입 요청은 기존 타입을 유지합니다. 관계가 없는 계층은 주소가 같아도 래퍼를 공유하지 않습니다. null은 nil이며, 등록하지 않은 타입이면 nil을 넣고 false를 반환합니다.
+- `pointer(L, index)`는 살아 있는 객체의 포인터, 그 외에는 nullptr입니다. `is_a(L, index, type)`와 `type_name(L, index)`는 타입만 판정하므로 만료된 래퍼도 클래스를 유지합니다. 크기와 메타테이블 표식을 함께 확인하므로 다른 라이브러리의 userdata는 이름 기반 객체로 읽지 않습니다.
+- **인스턴스 필드**는 객체마다 하나의 테이블입니다. 클래스에 없는 이름을 대입하면 생기고, 조회할 때 클래스 멤버보다 먼저 확인합니다. 따라서 `obj.method = function ... end`처럼 객체 하나의 메서드만 감싸고 nil 대입으로 되돌릴 수 있습니다. `push_fields`·`set_fields`로 테이블 전체를 읽고 교체하며, 교체한 테이블의 메타테이블(`__index`·`__newindex`)도 조회·대입에 적용됩니다. 필드는 registry에 고정하지 않으므로 자기 자신을 참조해도 수거됩니다.
+- **소유권**은 래퍼마다 정합니다. 기본은 native 소유이며 GC는 래퍼만 정리합니다. `own`은 Lua 소유로 바꿔 래퍼 수거나 VM 종료 시 collector를 한 번 실행하고, `disown`은 되돌립니다.
+- `pin(L, index)`은 native가 소유한 객체의 래퍼와 필드를 `unpin(L, pointer, type)` 또는 만료까지 유지합니다. Lua 변수가 없어도 객체에 붙인 필드·콜백이 사라지지 않습니다. 동일성과 마찬가지로 계층 단위로 관리하며 `type`에는 계층의 어느 클래스 이름이든 쓸 수 있습니다.
+- `invalidate(L, pointer, type)`(`binder::invalidate_named_object`)는 native 소멸 통지입니다. 계층의 어느 클래스 이름으로도 래퍼를 찾으며, 포인터·필드·pin·소유권을 정리하고 collector는 실행하지 않습니다. 이후 같은 주소의 객체는 새 래퍼를 받습니다. 만료된 래퍼의 필드 조회는 nil, 멤버 조회는 그대로 동작하므로 raw 함수가 `pointer()`의 nullptr를 검사해야 합니다.
+
+등록 API(`named_class`)는 다른 등록 API처럼 `arky::error`를 던집니다. `named_object` 함수는 raw 콜백 안에서 쓰도록 C++ 예외를 던지지 않으며 실패를 반환값으로 알립니다. 다른 Lua API처럼 메모리를 할당하는 호출은 메모리 부족 오류를 낼 수 있습니다. `pointer`·`type_name`·`own`·`disown`·`unpin`과 등록된 타입에 대한 `invalidate`는 할당하지 않으므로 보호 호출 밖의 소멸자에서도 사용할 수 있습니다. 모든 호출은 VM의 스레드에서 수행합니다.
+
+typed 함수에서 이름 기반 객체를 받으려면 포인터를 감싼 값 타입에 `arky::converter<T>`를 정의합니다. 같은 클래스에 raw 멤버와 typed 멤버를 함께 등록할 수 있습니다.
+
+```cpp
+struct NodeRef { Node* value; };
+namespace arky {
+template<> struct converter<NodeRef> {
+    static constexpr bool enabled = true;
+    static NodeRef read(lua_State* L, int index) {
+        auto* node = named_object::is_a(L, index, "cc.Node")
+            ? static_cast<Node*>(named_object::pointer(L, index)) : nullptr;
+        if (!node) throw error("expected a live cc.Node");
+        return {node};
+    }
+    static void push(lua_State* L, NodeRef node) {
+        if (!named_object::push(L, node.value, "cc.Node")) throw error("cc.Node is not registered");
+    }
+};
+}
+
+lua.reg_named_class("cc.Node").reg_method("moveBy", [](NodeRef self, float dx, float dy) { self.value->moveBy(dx, dy); });
+```
+
+`reg_class<T>`로 등록한 typed 객체와 이름 기반 객체는 서로 다른 userdata이며 자동으로 변환하지 않습니다. [등록·동일성·필드·소유권·만료 테스트](../tests/binder/named_class.cpp)를 참고하세요. 타입 선언, 모듈·클래스 열기, 예약 이름, 배열 속성처럼 스택 기반으로 등록하는 기존 코드를 공개 API만으로 연결하는 방법은 [어댑터 계약 테스트](../tests/binder/named_adapter.cpp)와 [호스트 어댑터 경계](../docs/binder-extensibility.md#구현한-이름-기반-클래스-등록)에 있습니다.
 
 ## 핵심 인자 변환 모듈
 

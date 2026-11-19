@@ -3,6 +3,7 @@
 // C++20 function and class registration, script execution, and host calls.
 // Author: eugene.choi.
 #include "lua_class.h"
+#include "lua_named_class.h"
 #include "lua_value.h"
 
 namespace arky {
@@ -50,6 +51,13 @@ public:
     // Invalidates all const/mutable views without calling decRef a second time.
     template<class T> std::size_t invalidate_ref_object(T* value) {
         return detail::invalidate_reference(L_, value);
+    }
+    // Classes identified by a runtime name, for raw generated or legacy
+    // bindings. Creates the class on first use and reopens it afterwards.
+    named_class reg_named_class(std::string_view type) { return named_class(L_, type); }
+    // Destruction notice for an object exposed through named_object::push.
+    std::size_t invalidate_named_object(void* value, std::string_view type) {
+        return named_object::invalidate(L_, value, type);
     }
     template<class T> void set_var(std::string_view name, T&& value) {
         detail::stack_guard stack(L_);

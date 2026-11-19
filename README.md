@@ -56,6 +56,8 @@ lua.dostring("assert(sum(20, 22) == 42)");
 
 `make binder-examples`는 [클래스·생성자·프로퍼티](examples/cpp_class.cpp)와 [C++20 concept 기반 공통 동작](examples/cpp_traits.cpp)을 포함한 C++ 예제 5개를 실행합니다. 여기에는 실제 OS 스레드 풀을 사용하는 [Task 예제](examples/cpp_tasks.cpp)도 포함됩니다. [예제 목록](examples/README.md)에는 C++ 및 스크립트 `class`·`trait`의 실행 명령과 출력을 정리했습니다.
 
+타입 이름과 `lua_CFunction`으로 작성한 기존·생성 바인딩은 `reg_named_class("cc.Node")`와 `named_object`로 등록합니다. 클래스 등록·상속·객체 동일성·소유권·만료를 바인더가 처리하므로 엔진 어댑터는 공개 API만 사용합니다. [이름 기반 클래스 안내](binder/README.md#이름으로-등록하는-네이티브-클래스)를 참고하세요.
+
 네이티브 `Sprite : Node` 관계는 `.reg_base<Node>()`로 등록합니다. 부모 메서드·프로퍼티 접근과 부모 포인터·참조·`shared_ptr` 변환을 지원합니다. [렌더링 바인딩 예제](examples/cpp_rendering.cpp), [상속 규칙과 trait 확장 설계](docs/native-bindings.md)에 등록 순서·충돌·수명 규칙을 정리했습니다.
 
 `impl Named for engine.Sprite`로 네이티브 타입에 스크립트 trait을 구현할 수 있습니다. 선언 파일의 `declare class Sprite extends Node`는 부모 관계와 호출 계약을 검사기에 전달합니다. [impl·네이티브 선언 매뉴얼](docs/impl.md), [스크립트 예제](examples/impl.arky), [실제 C++ 객체 연결 예제](examples/native_traits/main.arky)를 제공합니다.
