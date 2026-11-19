@@ -280,6 +280,15 @@ void identity_and_refinement() {
     check(std::string_view(named_object::type_name(L, -2)) == "Outer"
           && std::string_view(named_object::type_name(L, -1)) == "Inner", "neither wrapper is retyped");
     check(!named_object::is_a(L, -1, "Outer") && !named_object::is_a(L, -1, "Missing"), "unrelated and unknown kinds fail");
+    check(!named_object::is_a(L, -1, "Sprit") && !named_object::is_a(L, -1, "Sprite2") && !named_object::is_a(L, -1, ""),
+          "a kind is matched by its whole name");
+    check(named_object::identified_pointer(L, -1) == named_object::pointer(L, -1) && named_object::pointer(L, -1) != nullptr,
+          "a raw callback that checked the kind reads the pointer directly");
+    lua_pushnumber(L, 1);
+    lua_newuserdata(L, 64);
+    check(!named_object::identified_pointer(L, -2) && !named_object::identified_pointer(L, -1) && !named_object::is_a(L, -1, "Node"),
+          "other values have no object pointer");
+    lua_pop(L, 2);
     lua_settop(L, top);
 
     check(!named_object::push(L, &node, "Missing") && lua_isnil(L, -1), "an unregistered class pushes nil");

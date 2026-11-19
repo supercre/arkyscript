@@ -181,6 +181,7 @@ lua.reg_named_class<Node>("cc.Node").chain_void_methods()
 - `reg_native_lifetime(pin, hook)`은 native가 소유하는 계층의 래퍼 수명을 정합니다. 래퍼를 새로 만들 때 `hook(object)`을 부르고, `pin`이면 `invalidate`까지 래퍼와 필드를 유지합니다. 가장 가까운 클래스의 설정을 사용합니다.
 - C++ 예외는 Lua 오류가 됩니다. 맞는 오버로드가 없으면 `invalid arguments to 'name'` 오류입니다.
 - `reg_static`으로 등록한 함수는 클래스에 대해 호출합니다(`Class:name(...)`). `Class.name(...)`이나 `object:name(...)`처럼 클래스가 아닌 값이 receiver 자리에 오면 첫 인자를 건너뛰지 않고 오류로 처리합니다.
+- **raw 콜백의 객체 조회**: `named_object::is_a`는 객체 자신의 클래스 이름과 먼저 비교하므로 흔한 경우 문자열 조회가 없습니다. 타입을 확인한 뒤에는 `named_object::identified_pointer`로 클래스 표식을 다시 찾지 않고 포인터를 읽습니다.
 - **Lua 소유와 유지**: `lua_owned<T>` 결과와 `named_object::own`은 `reg_native_lifetime`의 유지(pin)를 해제합니다. Lua가 소유한 객체는 래퍼가 수집될 때 collector로 정리되어야 하기 때문입니다. 소유권을 가져온 뒤에도 유지해야 하는 호스트는 `named_object::pin`을 다시 호출합니다.
 - **한 클래스에 여러 C++ 타입**: 같은 이름으로 `reg_named_class<U>`를 다시 호출하면 `U`도 그 클래스에 연결됩니다(호스트 전용 파생 타입을 부모 이름으로 노출하는 경우). 두 타입 모두 인자와 결과로 변환됩니다.
 - **이름으로만 등록한 클래스와 함께 쓰기**: 호스트가 C++ 타입과 클래스 이름의 대응을 따로 관리한다면 `named_class::reg_type_resolver(L, resolver)`로 알려 줍니다. `reg_named_class<T>`로 연결하지 않은 다형 타입의 객체가 연결된 부모 타입의 포인터로 노출될 때 resolver가 돌려준 이름의 클래스로 전달됩니다. `named_class::of_type(L, typeid(*object))`는 객체의 클래스 이름을 같은 규칙으로 조회합니다.

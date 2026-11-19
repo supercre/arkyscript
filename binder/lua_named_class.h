@@ -1293,22 +1293,38 @@ struct named_object {
         const auto* box = detail::named_box(L, index);
         return box ? box->value : nullptr;
     }
+    // The pointer of a value a raw callback has already identified as a named
+    // object (is_a, type_name): the class marker is not looked up again.
+    // nullptr when the object is expired or the value is no object userdata.
+    [[nodiscard]] static void* identified_pointer(lua_State* L, int index) {
+        if (lua_type(L, index) != LUA_TUSERDATA || lua_objlen(L, index) != sizeof(detail::named_storage)) return nullptr;
+        return static_cast<detail::named_storage*>(lua_touserdata(L, index))->value;
+    }
     // Whether the value is a named object of type or of a class derived from
     // it. Type identity outlives the native object: an invalidated wrapper
     // keeps its class.
     [[nodiscard]] static bool is_a(lua_State* L, int index, std::string_view type) {
         if (lua_type(L, index) != LUA_TUSERDATA || lua_objlen(L, index) != sizeof(detail::named_storage)
             || !lua_checkstack(L, 3) || !lua_getmetatable(L, index)) return false;
-        lua_pushlightuserdata(L, &detail::named_kinds_key);
+        // The object's own class is the common case and needs no string lookup.
+        lua_pushlightuserdata(L, &detail::named_name_key);
         lua_rawget(L, -2);
-        bool result = false;
-        if (lua_istable(L, -1)) {
-            lua_pushlstring(L, type.data(), type.size());
+        std::size_t size = 0;
+        const char* name = lua_type(L, -1) == LUA_TSTRING ? lua_tolstring(L, -1, &size) : nullptr;
+        bool result = name && size == type.size() && std::memcmp(name, type.data(), size) == 0;
+        lua_pop(L, 1);
+        if (!result && name) {
+            lua_pushlightuserdata(L, &detail::named_kinds_key);
             lua_rawget(L, -2);
-            result = lua_toboolean(L, -1) != 0;
+            if (lua_istable(L, -1)) {
+                lua_pushlstring(L, type.data(), type.size());
+                lua_rawget(L, -2);
+                result = lua_toboolean(L, -1) != 0;
+                lua_pop(L, 1);
+            }
             lua_pop(L, 1);
         }
-        lua_pop(L, 2);
+        lua_pop(L, 1);
         return result;
     }
     // Class name of a named object, valid as long as the class; else nullptr.
