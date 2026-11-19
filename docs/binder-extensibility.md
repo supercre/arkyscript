@@ -67,6 +67,7 @@ native 소멸 시 호스트는 `invalidate_ref_object(root_pointer)`를 호출�
 | 객체별 Lua 테이블(peer) 읽기·교체 | `named_object::push_fields`, `set_fields` |
 | 재정의 전 원본 함수 조회 | `named_class::push_native` |
 | 소멸 통지에 따른 래퍼 제거 | `named_object::invalidate` |
+| 소멸한 객체를 검사하지 않는 생성 코드 보호 | `named_class::enable_expired_guard` |
 
 ## 남은 객체 확장
 
@@ -94,6 +95,6 @@ native 소멸 시 호스트는 `invalidate_ref_object(root_pointer)`를 호출�
 
 먼저 엔진 의존성이 없는 바인더 테스트로 계약을 검증합니다. 이후 호스트 어댑터를 통해 `Ref`·`Node`·`Sprite`의 생성, 동일 객체 재노출, Lua 필드, 콜백, 파괴를 확인합니다. 기존 tolua 호출 규약과의 호환은 별도 테스트로 확인합니다.
 
-전체 엔진 바인딩은 이름 기반 클래스로 등록합니다. 생성·수동 등록 코드는 그대로 두고, 기존 등록 호출을 위 표의 공개 API로 연결하는 얇은 어댑터만 호스트 저장소에 둡니다. `Ref`는 native 소유이므로 노출할 때 `pin`으로 래퍼를 유지하고 소멸 통지에서 `invalidate`를 호출합니다. 값 객체처럼 Lua가 수명을 정하는 타입은 `own`과 collector를 사용합니다. 호스트 저장소에서는 같은 Lua 스크립트를 기존 런타임과 어댑터에 각각 실행해 결과를 비교합니다.
+전체 엔진 바인딩은 이름 기반 클래스로 등록합니다. 생성·수동 등록 코드는 그대로 두고, 기존 등록 호출을 위 표의 공개 API로 연결하는 얇은 어댑터만 호스트 저장소에 둡니다. `Ref`는 native 소유이므로 노출할 때 `pin`으로 래퍼를 유지하고 소멸 통지에서 `invalidate`를 호출합니다. 값 객체처럼 Lua가 수명을 정하는 타입은 `own`과 collector를 사용합니다. 생성 코드가 Release 빌드에서 소멸한 self를 검사하지 않으면 `enable_expired_guard()`로 만료된 객체를 통한 native 호출을 Lua 오류로 바꿉니다. 실제 등록 코드에는 자기 자신을 부모로 선언한 클래스처럼 바인더가 거부하는 입력도 있으므로 어댑터가 걸러 냅니다. 호스트 저장소에서는 같은 Lua 스크립트를 기존 런타임과 어댑터에 각각 실행해 결과를 비교합니다.
 
 Epic7와 SSR은 `yuna`를 공유하므로 Epic7에서 선택적으로 연결할 수 있어야 합니다. 바인더의 새 기능만으로 `luacocos2d` 전체 교체가 완료되었다고 판단하지 않습니다. 실제 적용 시 두 프로젝트의 호출부와 플랫폼 빌드도 확인합니다.
