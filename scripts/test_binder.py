@@ -7,13 +7,16 @@ import subprocess
 import sys
 
 from build_common import ROOT, dependencies, find_tool, run
+import embed_runtime
 
 
+RUNTIME_SOURCES = (ROOT / "tests/task/pool.cpp", ROOT / "tests/task/lua.cpp", ROOT / "tests/io/io.cpp",
+                   ROOT / "tests/runtime/host.cpp")
 TEST_SOURCES = tuple(ROOT / "tests" / "binder" / name for name in
                      ("arg.cpp", "converter.cpp", "object.cpp", "value.cpp", "binder.cpp",
                       "raw_callbacks.cpp", "stack_balance.cpp", "class_stack.cpp",
                       "inheritance.cpp", "ref_object.cpp", "compatibility.cpp",
-                      "named_class.cpp", "named_adapter.cpp", "named_typed.cpp")) + (ROOT / "tests/task/pool.cpp", ROOT / "tests/task/lua.cpp", ROOT / "tests/io/io.cpp")
+                      "named_class.cpp", "named_adapter.cpp", "named_typed.cpp")) + RUNTIME_SOURCES
 EXAMPLE_SOURCES = tuple(ROOT / "examples" / name for name in
                         ("cpp_binder.cpp", "cpp_class.cpp", "cpp_traits.cpp", "cpp_tasks.cpp", "cpp_rendering.cpp",
                          "cpp_named_class.cpp"))
@@ -82,7 +85,9 @@ def main():
     revision = dependencies()["luajit"]["revision"]
     sources = EXAMPLE_SOURCES if args.examples else SOURCES
     if args.tasks:
-        sources = (ROOT / "tests/task/pool.cpp", ROOT / "tests/task/lua.cpp", ROOT / "tests/io/io.cpp", ROOT / "examples/cpp_tasks.cpp")
+        sources = RUNTIME_SOURCES + (ROOT / "examples/cpp_tasks.cpp",)
+    if ROOT / "tests/runtime/host.cpp" in sources and embed_runtime.TARGET.read_text() != embed_runtime.render():
+        raise RuntimeError("runtime/arky_runtime_lua.inc is stale; run python3 scripts/embed_runtime.py")
     if args.windows:
         windows(revision, sources=sources)
     else:

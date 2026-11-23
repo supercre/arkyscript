@@ -7,7 +7,7 @@ local unpack_values, count_values = unpack, select
 local coroutine_create, coroutine_resume = coroutine.create, coroutine.resume
 local coroutine_yield, coroutine_status, coroutine_running = coroutine.yield, coroutine.status, coroutine.running
 local traceback, stringify = debug.traceback, tostring
-local floor = math.floor
+local floor, huge = math.floor, math.huge
 local function pack(...) return {n=count_values("#", ...), ...} end
 local function text(value)
    local ok, result = protected_call(stringify, value)
@@ -26,6 +26,8 @@ local function capture_adapter(loader, name)
       if lua_type(fn) ~= "function" then return end
    end
    if not adapter.ready or not adapter.wait or not adapter.cancel or not adapter.sleep then return end
+   -- The monotonic clock is optional: a module built before timers existed has none.
+   if lua_type(native._async_now) == "function" then adapter.now = native._async_now end
    return adapter, native
 end
 local worker_adapter = capture_adapter(worker_loader, "tynex_task")
@@ -41,6 +43,7 @@ if io_adapter then
 end
 io_native = nil
 local sleep = worker_adapter and worker_adapter.sleep or io_adapter and io_adapter.sleep
+local now = worker_adapter and worker_adapter.now or io_adapter and io_adapter.now
 
 -- Lua 5.1 weak-key tables are not ephemerons: storing a state which contains
 -- its own Task result would otherwise keep that entire result graph alive.
@@ -91,18 +94,44 @@ local function detach_waiter(state)
       state.waiting_on = nil
    end
 end
+-- A combined Task (scheduler.all, scheduler.race) which is settled no longer waits
+-- for its other inputs: a Task which outlives many of them must not collect them.
+local function release_inputs(state)
+   local inputs = state.inputs
+   state.inputs, state.notify = nil, nil
+   for i=1,#inputs do
+      local dependency = inputs[i]
+      if not finished(dependency) then
+         local retained = {}
+         for j=1,#dependency.waiters do
+            local waiter = dependency.waiters[j]
+            if waiter ~= state then retained[#retained+1] = waiter end
+         end
+         dependency.waiters = retained
+      end
+   end
+end
 local function settle(state, status, values, failure, trace)
    if finished(state) then return false end
    detach_waiter(state)
    state.status, state.values, state.failure, state.trace = status, values, failure, trace
    state.thread, state.arguments, state.request, state.adapter, state.transform = nil, nil, nil, nil, nil
    requests[state] = nil
+   if state.clock then
+      state.clock.waiting = state.clock.waiting - 1
+      state.clock = nil
+   end
    active = active - 1
+   if state.inputs then release_inputs(state) end
+   -- Waiters hear of it in the order they began to wait: async functions are
+   -- queued, combined Tasks are told at once and may settle in turn.
    local waiters = state.waiters
    state.waiters = {}
    for i=1,#waiters do
       local waiter = waiters[i]
-      if waiter.status == "waiting" and waiter.waiting_on == state then
+      if waiter.notify then
+         waiter.notify(state)
+      elseif waiter.status == "waiting" and waiter.waiting_on == state then
          waiter.waiting_on = nil
          enqueue(waiter)
       end
@@ -134,30 +163,263 @@ function methods:cancel()
    end
    return settle(state, "cancelled", nil, "async task cancelled", traceback("async task cancelled", 2))
 end
+local resume_one
+-- An async function runs at its call, up to its first await, as a plain function
+-- would: the caller sees what it did before it waited. Every such start is a
+-- coroutine resumed inside the caller, so calls nested deeper than this are
+-- queued instead and start at the next step: recursion as deep as memory allows
+-- must not exhaust the C stack.
+local nesting, nesting_limit = 0, 200
+local function start(state)
+   if nesting >= nesting_limit then return enqueue(state) end
+   state.status = "queued"
+   nesting = nesting + 1
+   resume_one(state)
+   nesting = nesting - 1
+end
 function scheduler.create(fn)
    if lua_type(fn) ~= "function" then raise("async expects a function", 2) end
    return function(...)
       local state = {status="created", thread=coroutine_create(fn), arguments=pack(...)}
       local task = new_task(state)
-      enqueue(state)
+      start(state)
       return task
    end
 end
+-- Whether state waits for target, directly or through the Tasks it waits for.
+local function waits_for(state, target, seen)
+   while state do
+      if state == target then return true end
+      local inputs = state.inputs
+      if inputs then
+         seen = seen or {}
+         if seen[state] then return false end
+         seen[state] = true
+         for i=1,#inputs do
+            if waits_for(inputs[i], target, seen) then return true end
+         end
+         return false
+      end
+      state = state.waiting_on
+   end
+   return false
+end
 function scheduler.await(task)
-   if not current or coroutine_running() ~= current.thread then
+   if not current then raise("await is only valid inside a managed async function", 2) end
+   -- Cancelled while it ran, by itself or by a function it called: it stops at its next await.
+   if finished(current) then raise("async task cancelled", 2) end
+   if coroutine_running() ~= current.thread then
       raise("await is only valid inside a managed async function", 2)
    end
-   if finished(current) then raise("async task cancelled", 2) end
    local dependency = record(task)
    if finished(dependency) then return result(dependency) end
-   local cursor = dependency
-   while cursor do
-      if cursor == current then raise("async await dependency cycle", 2) end
-      cursor = cursor.waiting_on
-   end
+   if waits_for(dependency, current) then raise("async await dependency cycle", 2) end
    coroutine_yield(yield_marker, dependency)
    return result(dependency)
 end
+-- Timers, in milliseconds like every other time of this API. Host time advances
+-- by what the host passes to step: a game's frame time, so pausing or scaling
+-- the game applies to it. Real time follows the monotonic clock of a native
+-- module. A host which passes no elapsed time (the CLI, for one) lets host time
+-- follow real time.
+-- Each clock keeps a binary heap of waiting timers: earliest first, then in the
+-- order they were created. A cancelled timer stays in the heap until it is due.
+local host_clock = {time=0, heap={}, size=0, waiting=0}
+local real_clock = {time=0, heap={}, size=0, waiting=0}
+local timer_order = 0
+local last_real = now and now()
+local function earlier(a, b)
+   return a.due < b.due or (a.due == b.due and a.order < b.order)
+end
+local function push_timer(clock, state)
+   local heap, index = clock.heap, clock.size + 1
+   clock.size = index
+   while index > 1 do
+      local parent = floor(index / 2)
+      if not earlier(state, heap[parent]) then break end
+      heap[index] = heap[parent]
+      index = parent
+   end
+   heap[index] = state
+end
+local function pop_timer(clock)
+   local heap, size = clock.heap, clock.size
+   local top, moved = heap[1], heap[size]
+   heap[size] = nil
+   size = size - 1
+   clock.size = size
+   if size > 0 then
+      local index = 1
+      while true do
+         local child = index * 2
+         if child > size then break end
+         if child < size and earlier(heap[child + 1], heap[child]) then child = child + 1 end
+         if not earlier(heap[child], moved) then break end
+         heap[index] = heap[child]
+         index = child
+      end
+      heap[index] = moved
+   end
+   return top
+end
+local function fire_timers(clock)
+   local heap = clock.heap
+   while clock.size > 0 and heap[1].due <= clock.time do
+      settle(pop_timer(clock), "succeeded", {n=0})
+   end
+end
+local function duration(milliseconds, name, level)
+   -- The comparison is false for NaN too.
+   if lua_type(milliseconds) ~= "number" or not (milliseconds >= 0) or milliseconds == huge then
+      raise(name .. " expects milliseconds: a number, zero or more", level)
+   end
+end
+-- Cancelled timers are dropped once they outnumber the waiting ones: a timeout
+-- which is cancelled each time would otherwise stay until its distant due time.
+local function compact(clock)
+   local heap, size = clock.heap, clock.size
+   clock.heap, clock.size = {}, 0
+   for index = 1, size do
+      if not finished(heap[index]) then push_timer(clock, heap[index]) end
+   end
+end
+local function new_timer(clock, due)
+   if clock.size > 64 and clock.size > 2 * clock.waiting then compact(clock) end
+   timer_order = timer_order + 1
+   local state = {status="waiting", clock=clock, due=due, order=timer_order}
+   local task = new_task(state)
+   clock.waiting = clock.waiting + 1
+   push_timer(clock, state)
+   return task
+end
+-- The Task completes, with no value, once that much host time has passed.
+-- sleep(0) completes at the next step: "the next frame".
+function scheduler.sleep(milliseconds)
+   duration(milliseconds, "scheduler.sleep", 3)
+   return new_timer(host_clock, host_clock.time + milliseconds)
+end
+function scheduler.sleep_realtime(milliseconds)
+   duration(milliseconds, "scheduler.sleep_realtime", 3)
+   if not now then raise("scheduler.sleep_realtime needs the clock of the native task or I/O module", 2) end
+   return new_timer(real_clock, now() + milliseconds)
+end
+-- Moves the clocks to the start of a step and completes the timers which are due.
+local function advance(elapsed)
+   local real = now and now()
+   if elapsed then
+      host_clock.time = host_clock.time + elapsed
+   elseif real then
+      host_clock.time = host_clock.time + (real - last_real)
+   end
+   if real then
+      last_real = real
+      real_clock.time = real
+      fire_timers(real_clock)
+   end
+   fire_timers(host_clock)
+end
+
+-- A Task which is completed from outside the scheduler: by a callback, an
+-- event, the host. resolve(...) completes it with those values and reject(e)
+-- fails it; each returns true only for the call which completed the Task.
+-- Call them on the thread which owns this Lua state.
+function scheduler.deferred()
+   local state = {status="waiting"}
+   local task = new_task(state)
+   local function resolve(...)
+      return settle(state, "succeeded", pack(...))
+   end
+   local function reject(failure)
+      return settle(state, "failed", nil, failure, traceback(text(failure), 2))
+   end
+   return task, resolve, reject
+end
+
+-- Several Tasks as one. scheduler.all succeeds once every Task has, with an
+-- array of each one's first value in the order given, and fails as soon as one
+-- of them fails or is cancelled. scheduler.race settles as the first Task to
+-- settle does, with all its values. Neither cancels the Tasks it was given, and
+-- cancelling the combined Task leaves them running.
+local function inputs_of(tasks, name)
+   if lua_type(tasks) ~= "table" then raise(name .. " expects an array of Tasks", 3) end
+   local inputs = {}
+   for index=1,#tasks do
+      local state = states[tasks[index]]
+      if not state then raise(name .. " expects an array of Tasks", 3) end
+      inputs[index] = state
+   end
+   return inputs
+end
+-- Registers a combined Task with the pending Tasks it waits for.
+local function watch(state, watched, notify)
+   state.inputs, state.notify = watched, notify
+   for i=1,#watched do
+      local waiters = watched[i].waiters
+      waiters[#waiters+1] = state
+   end
+end
+function scheduler.all(tasks)
+   local inputs = inputs_of(tasks, "scheduler.all")
+   local state = {status="waiting"}
+   local task = new_task(state)
+   local results, remaining = {}, #inputs
+   -- A Task may be listed more than once: positions[its state] are its places.
+   local positions, watched = {}, {}
+   for index=1,#inputs do
+      local dependency = inputs[index]
+      if not finished(dependency) then
+         local places = positions[dependency]
+         if not places then
+            places = {}
+            positions[dependency] = places
+            watched[#watched+1] = dependency
+         end
+         places[#places+1] = index
+      elseif dependency.status == "succeeded" then
+         results[index] = dependency.values[1]
+         remaining = remaining - 1
+      else
+         settle(state, "failed", nil, dependency.failure, dependency.trace)
+         return task
+      end
+   end
+   if remaining == 0 then
+      settle(state, "succeeded", {n=1, results})
+      return task
+   end
+   watch(state, watched, function(dependency)
+      if dependency.status ~= "succeeded" then
+         settle(state, "failed", nil, dependency.failure, dependency.trace)
+         return
+      end
+      local places = positions[dependency]
+      for i=1,#places do results[places[i]] = dependency.values[1] end
+      remaining = remaining - #places
+      if remaining == 0 then settle(state, "succeeded", {n=1, results}) end
+   end)
+   return task
+end
+function scheduler.race(tasks)
+   local inputs = inputs_of(tasks, "scheduler.race")
+   -- A race nobody runs in would never end.
+   if #inputs == 0 then raise("scheduler.race expects at least one Task", 2) end
+   local state = {status="waiting"}
+   local task = new_task(state)
+   local function finish(dependency)
+      if dependency.status == "succeeded" then settle(state, "succeeded", dependency.values)
+      else settle(state, "failed", nil, dependency.failure, dependency.trace) end
+   end
+   for index=1,#inputs do
+      if finished(inputs[index]) then
+         finish(inputs[index])
+         return task
+      end
+   end
+   -- A Task listed twice is told twice; the second time changes nothing.
+   watch(state, inputs, finish)
+   return task
+end
+
 local function wrap_request(handle, adapter, transform)
    -- The C adapter checks exact userdata storage, metatable, and private tag.
    -- Never invoke arbitrary ready/wait/cancel methods supplied by the caller.
@@ -242,9 +504,12 @@ local function poll_requests()
       end
    end
 end
-local function resume_one(state)
+function resume_one(state)
    if state.status ~= "queued" then return end
    state.status = "running"
+   -- The function may be starting inside one which is running. That one is
+   -- current again when this returns, with the failure it last looked at.
+   local caller, caller_failure = current, last_failure
    current = state
    last_failure = nil
    local arguments = state.arguments
@@ -252,9 +517,10 @@ local function resume_one(state)
    local values
    if arguments then values = pack(coroutine_resume(state.thread, unpack_values(arguments, 1, arguments.n)))
    else values = pack(coroutine_resume(state.thread)) end
-   current = nil
-   if finished(state) then return end
-   if not values[1] then
+   current = caller
+   if finished(state) then
+      -- Cancelled while it ran: what its coroutine did afterwards does not count.
+   elseif not values[1] then
       local trace = traceback(state.thread, text(values[2]), 0)
       if last_failure and raw_equal(last_failure.failure, values[2]) and last_failure.trace then
          trace = last_failure.trace .. "\nawaited from:\n" .. trace
@@ -273,14 +539,17 @@ local function resume_one(state)
       local failure = "async functions must suspend using await, not coroutine.yield"
       settle(state, "failed", nil, failure, traceback(state.thread, failure, 0))
    end
+   if caller then last_failure = caller_failure end
 end
-local function step(max_resumes)
+local function step(max_resumes, elapsed)
    if pumping or current then raise("scheduler.step cannot run inside an async function or another pump", 2) end
    if max_resumes == nil then max_resumes = 64 end
    if lua_type(max_resumes) ~= "number" or max_resumes < 1 or max_resumes > 1000000 or max_resumes ~= floor(max_resumes) then
       raise("scheduler.step expects an integer budget from 1 to 1000000", 2)
    end
+   if elapsed ~= nil then duration(elapsed, "scheduler.step", 3) end
    pumping = true
+   advance(elapsed)
    poll_requests()
    local resumed = 0
    while first <= last and resumed < max_resumes do
@@ -305,6 +574,10 @@ function scheduler.run(task)
       step()
       if not finished(state) and first > last then
          if lua_next(requests) then sleep(1)
+         elseif host_clock.waiting > 0 or real_clock.waiting > 0 then
+            -- Only a native module can wait and tell the time.
+            if not now then raise("scheduler.run cannot wait for a timer without the native task or I/O module", 2) end
+            sleep(1)
          else raise("async scheduler deadlock: no runnable task or pending native job", 2) end
       end
    end

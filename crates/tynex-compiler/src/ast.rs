@@ -28,6 +28,8 @@ pub enum Type {
     Task(Box<Pack>),
     AsyncRun,
     AsyncStep,
+    AsyncAll,
+    AsyncRace,
     Receiver(Box<Type>),
     IteratorFactory(bool),
     Require,
@@ -261,6 +263,8 @@ impl std::fmt::Display for Type {
             Self::Function(..)
             | Self::AsyncRun
             | Self::AsyncStep
+            | Self::AsyncAll
+            | Self::AsyncRace
             | Self::IteratorFactory(_)
             | Self::Require
             | Self::Select

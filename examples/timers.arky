@@ -1,0 +1,34 @@
+--!typecheck strict
+-- Timers, a Task which is completed from outside the scheduler, and several Tasks at once.
+
+local async function countdown(start: number): string
+   for remaining = start, 1, -1 do
+      print("countdown", remaining)
+      -- Milliseconds of host time: a game host advances it by its frame time, the CLI by the clock.
+      await scheduler.sleep(10)
+   end
+   return "liftoff"
+end
+
+local async function main(): ()
+   -- resolve is called later by whoever owns the event: here another async
+   -- function, in a game a click handler or a response callback.
+   local message: Task<string>, resolve = scheduler.deferred()
+   local async function announce(): ()
+      await scheduler.sleep_realtime(20)
+      resolve("ready")
+   end
+   announce()
+   print(await countdown(3))
+   print("message", await message)
+
+   -- Several Tasks at once: every one of them...
+   local words = await scheduler.all({ countdown(1), countdown(1) })
+   print("both", words[1], words[2])
+   -- ...or whichever settles first. Here a timeout: the timer wins, and the Task it guarded still waits.
+   local never: Task<string> = scheduler.deferred()
+   local answer: string? = await scheduler.race({ never, scheduler.sleep(10) })
+   print("answer", answer, never:status())
+end
+
+scheduler.run(main())

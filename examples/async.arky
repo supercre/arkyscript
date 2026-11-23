@@ -5,20 +5,22 @@ local async function double(value: number): number
 end
 
 local async function main(): number
+   -- An async function starts at its call and runs up to its first await:
+   -- both doubles are finished here, and awaiting them does not wait.
    local first: Task<number> = double(21)
    local second = double(15)
+   -- Waiting gives the frame back; the scheduler resumes main at a later step.
+   await scheduler.sleep(1)
    local a = await first
    local b = await second
    return a + b
 end
 
 local pending = main()
-print("scheduled", pending:status())
+print("started", pending:status())
 print("result", scheduler.run(pending))
 
 -- A game host can instead call scheduler.step() once per frame.
-local framed = double(10)
-while scheduler.step(1) do
-   print("pending", scheduler.pending())
-end
+local framed = main()
+while scheduler.step(1) do end
 print("frame result", framed:result())

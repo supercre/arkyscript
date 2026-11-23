@@ -61,6 +61,6 @@ make binder-windows        # Windows 테스트·예제 EXE 크로스 빌드
 
 `tynex_task.so`/`tynex_task.dll`을 사용하는 LuaJIT 실행 파일 옆에 둔다. Tynex 실행기는 그 경로를 `package.cpath`에 추가한다. 순수 LuaJIT 실행은 `LUA_CPATH`나 `package.cpath`로 모듈 경로를 설정한다. 네이티브 모듈은 **바로 그 LuaJIT 빌드**에 맞춰 빌드하며, Windows DLL은 `lua51.dll`과 함께 배포한다. `make windows`가 만드는 엔진 ZIP과 별도로 Task·I/O 모듈을 포함하는 `tynex-windows-x64-<SHA>.zip`을 제공한다.
 
-공식 엔진 업데이트 검증에는 Task 네이티브 빌드·Windows 크로스 빌드·C++ 테스트·Lua 실행 검증을 포함한다. 실제 Windows 실행은 CI의 별도 Windows job에서 수행한다. 현재 Task 대상은 macOS 개발 호스트, Linux와 Windows x64 빌드/CI이며 Android·iOS의 임베딩/패키징 검증은 후속 작업이다.
+공식 엔진 업데이트 검증에는 Task 네이티브 빌드·Windows 크로스 빌드·C++ 테스트·Lua 실행 검증을 포함한다. 실제 Windows 실행은 CI의 별도 Windows job에서 수행한다. 현재 Task 대상은 macOS 개발 호스트, Linux와 Windows x64 빌드/CI다. Android·iOS는 [호스트 임베딩](embedding.md) 형태로 컴파일만 확인했고 기기 검증은 후속 작업이다.
 
 현재 typed 함수 안의 `try/except`·`import`·`async/await` 변환도 컴파일러 helper를 upvalue로 캡처하므로 그 함수는 Task에 직접 제출할 수 없습니다. 워커는 외부 캡처 없는 계산 함수로 작성하고, 실패 처리는 예제처럼 호출 측 `wait()` 또는 `await scheduler.from_worker(handle)` 주위의 `try/except`에서 합니다. 워커 내부에서 오류를 처리해야 한다면 현재는 표준 Lua `pcall`을 사용할 수 있습니다.

@@ -9,6 +9,7 @@
 #else
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <netinet/in.h>
 #include <netdb.h>
 #include <poll.h>
 #include <fcntl.h>
@@ -22,10 +23,14 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <string>
+#include <string_view>
 
-namespace {
+// A named namespace instead of an anonymous one: arky_runtime.cpp compiles this file and
+// lua_task.cpp into one translation unit, and both use the same helper names.
+namespace arky::io_module {
 using clock_type = std::chrono::steady_clock;
 using deadline_type = clock_type::time_point;
 using arky::error;
@@ -58,8 +63,15 @@ std::string socket_message(const char* action, int code) {
     return std::string(action) + " failed (socket error " + std::to_string(code) + ")";
 }
 
+// A host may supply the bytes of fs.read_file itself (packed resources, for example). The reader runs
+// on a worker thread of this module, never on the Lua thread: it fills `bytes` with at most max_bytes
+// and returns true, or returns false with a message in `error`.
+using file_reader = std::function<bool(std::string_view path, std::size_t max_bytes, std::string& bytes, std::string& error)>;
+
 struct owner_state {
     std::unique_ptr<arky::task_pool> pool;
+    // Shared with running jobs: a read may outlive the Lua state which requested it.
+    std::shared_ptr<const file_reader> reader;
     std::size_t outstanding = 0;
     std::size_t sockets = 0;
 #if defined(_WIN32)
@@ -330,6 +342,17 @@ std::string load_file(const std::string& path, std::size_t maximum, deadline_typ
     return result;
 }
 
+std::string read_from_host(const file_reader& reader, const std::string& path, std::size_t maximum,
+                           deadline_type deadline, const arky::cancellation_token& stop) {
+    checkpoint(stop, deadline);
+    std::string bytes;
+    std::string message;
+    if (!reader(path, maximum, bytes, message)) throw error(message.empty() ? "cannot read file" : message);
+    if (bytes.size() > maximum) throw error("file exceeds max_bytes");
+    checkpoint(stop, deadline);
+    return bytes;
+}
+
 addresses resolve(const std::string& host, int port, deadline_type deadline,
                   const arky::cancellation_token& stop) {
     checkpoint(stop, deadline);
@@ -345,7 +368,7 @@ addresses resolve(const std::string& host, int port, deadline_type deadline,
     addresses output;
     for (auto* entry = raw; entry && output.size() < 64; entry = entry->ai_next) {
         if ((entry->ai_family != AF_INET && entry->ai_family != AF_INET6) ||
-            entry->ai_addrlen > sizeof(sockaddr_storage)) continue;
+            static_cast<std::size_t>(entry->ai_addrlen) > sizeof(sockaddr_storage)) continue;
         address item;
         item.family = entry->ai_family;
         item.length = static_cast<address_length>(entry->ai_addrlen);
@@ -500,6 +523,9 @@ int read_file(lua_State* L) {
     auto state = owner(L);
     auto work = std::make_shared<request>(state, operation::file, deadline);
     if (clock_type::now() >= deadline) work->fail("I/O operation timed out");
+    else if (state->reader) work->file_work.emplace(state->workers().submit([reader = state->reader, path = std::move(path), maximum, deadline](arky::cancellation_token stop) {
+        return read_from_host(*reader, path, maximum, deadline, stop);
+    }));
     else work->file_work.emplace(state->workers().submit([path = std::move(path), maximum, deadline](arky::cancellation_token stop) {
         return load_file(path, maximum, deadline, stop);
     }));
@@ -599,6 +625,12 @@ int sleep(lua_State* L) {
     std::this_thread::sleep_for(std::chrono::milliseconds(integer_arg(L, 1, 0, 1000, "sleep milliseconds")));
     return 0;
 }
+// Milliseconds on the monotonic clock, for the scheduler's timers.
+int now(lua_State* L) {
+    arity(L, 0, 0);
+    lua_pushnumber(L, std::chrono::duration<double, std::milli>(clock_type::now().time_since_epoch()).count());
+    return 1;
+}
 template<class T> int collect(lua_State* L) {
     const char* type = nullptr;
     if constexpr (std::is_same_v<T, owner_state>) type = owner_type;
@@ -622,11 +654,21 @@ template<class T> void metatable(lua_State* L, const char* name) {
     lua_pushboolean(L, false); lua_setfield(L, -2, "__metatable");
     lua_pop(L, 1);
 }
+// How a host passes its file reader to open_module: the address of this slot is the argument, so the
+// module never follows a pointer it did not create. Only open_for_host fills the slot.
+struct host_request { const file_reader* reader = nullptr; };
+inline thread_local host_request current_host_request;
+
 int open_module(lua_State* L) {
+    const file_reader* reader = nullptr;
+    if (lua_type(L, 1) == LUA_TLIGHTUSERDATA && lua_touserdata(L, 1) == &current_host_request)
+        reader = current_host_request.reader;
     metatable<owner_state>(L, owner_type);
     metatable<request>(L, request_type);
     metatable<socket_state>(L, socket_type);
-    push_box(L, std::make_shared<owner_state>(), owner_type);
+    auto owner = std::make_shared<owner_state>();
+    if (reader && *reader) owner->reader = std::make_shared<const file_reader>(*reader);
+    push_box(L, std::move(owner), owner_type);
     const int state = lua_gettop(L);
     lua_newtable(L);
     module_function<read_file>(L, "read_file", state);
@@ -638,15 +680,29 @@ int open_module(lua_State* L) {
     method<wait>(L, "_async_wait");
     method<cancel>(L, "_async_cancel");
     method<sleep>(L, "_async_sleep");
+    method<now>(L, "_async_now");
     return 1;
 }
-} // namespace
+// Opens the module for a host with its own file reader (null: regular files) and leaves the module
+// table on the stack. Like luaopen_tynex_io it raises a Lua error on failure, so call it protected.
+inline int open_for_host(lua_State* L, const file_reader* reader) {
+    current_host_request.reader = reader;
+    lua_pushcfunction(L, (arky::detail::boundary<open_module>));
+    lua_pushlightuserdata(L, &current_host_request);
+    lua_call(L, 1, 1);
+    current_host_request.reader = nullptr;
+    return 1;
+}
+} // namespace arky::io_module
 
-#if defined(_WIN32)
+// ARKY_RUNTIME_STATIC: the module is part of a host binary (arky_runtime.cpp) and is not exported.
+#if defined(ARKY_RUNTIME_STATIC)
+#define TYNEX_IO_EXPORT
+#elif defined(_WIN32)
 #define TYNEX_IO_EXPORT __declspec(dllexport)
 #else
 #define TYNEX_IO_EXPORT __attribute__((visibility("default")))
 #endif
 extern "C" TYNEX_IO_EXPORT int luaopen_tynex_io(lua_State* L) {
-    return arky::detail::boundary<open_module>(L);
+    return arky::detail::boundary<arky::io_module::open_module>(L);
 }

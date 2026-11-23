@@ -7,7 +7,9 @@
 #include <chrono>
 #include <thread>
 
-namespace {
+// A named namespace instead of an anonymous one: arky_runtime.cpp compiles this file and
+// lua_io.cpp into one translation unit, and both use the same helper names.
+namespace arky::task_module {
 constexpr const char* pool_type = "tynex.task.pool";
 constexpr const char* handle_type = "tynex.task.handle";
 constexpr std::size_t transfer_limit = 8 * 1024 * 1024;
@@ -178,6 +180,11 @@ int async_sleep(lua_State* L) {
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
     return 0;
 }
+// Milliseconds on the monotonic clock, for the scheduler's timers.
+int async_now(lua_State* L) {
+    lua_pushnumber(L, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    return 1;
+}
 int shutdown(lua_State* L) {
     auto& owner = pool(L);
     owner.closed = true;
@@ -233,15 +240,19 @@ int open(lua_State* L) {
     method<wait>(L, "_async_wait");
     method<cancel>(L, "_async_cancel");
     method<async_sleep>(L, "_async_sleep");
+    method<async_now>(L, "_async_now");
     return 1;
 }
-} // namespace
+} // namespace arky::task_module
 
-#if defined(_WIN32)
+// ARKY_RUNTIME_STATIC: the module is part of a host binary (arky_runtime.cpp) and is not exported.
+#if defined(ARKY_RUNTIME_STATIC)
+#define TYNEX_TASK_EXPORT
+#elif defined(_WIN32)
 #define TYNEX_TASK_EXPORT __declspec(dllexport)
 #else
 #define TYNEX_TASK_EXPORT __attribute__((visibility("default")))
 #endif
 extern "C" TYNEX_TASK_EXPORT int luaopen_tynex_task(lua_State* L) {
-    return arky::detail::boundary<open>(L);
+    return arky::detail::boundary<arky::task_module::open>(L);
 }

@@ -50,9 +50,13 @@ binder-sanitize:
 binder-windows:
 	python3 scripts/test_binder.py --windows
 
-.PHONY: task task-windows task-test
+.PHONY: task task-windows task-test embed-runtime
 task:
 	python3 scripts/build_task.py
+
+# After changing runtime/async.lua or runtime/host.lua: refresh the copy the host runtime carries.
+embed-runtime:
+	python3 scripts/embed_runtime.py
 
 task-windows:
 	python3 scripts/build_task.py --windows

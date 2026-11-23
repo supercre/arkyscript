@@ -208,6 +208,91 @@ fn scheduler_step_pending_and_worker_adapter_have_contracts() {
     );
 }
 #[test]
+fn scheduler_timers_and_deferred_tasks_have_contracts() {
+    accepts(
+        "local async function blink(): () await scheduler.sleep(500) await scheduler.sleep_realtime(0) end local t: Task<> = scheduler.sleep(1000)",
+    );
+    accepts("local more: boolean = scheduler.step(64, 16) local again: boolean = scheduler.step(nil, 0)");
+    rejects("scheduler.sleep()", "T006");
+    rejects("scheduler.sleep('1')", "T001");
+    rejects("scheduler.sleep_realtime(false)", "T001");
+    rejects("scheduler.sleep(1, 2)", "T006");
+    rejects("local n: number = scheduler.sleep(1)", "T001");
+    rejects("local t: Task<number> = scheduler.sleep(1)", "T001");
+    rejects("scheduler.step(64, 'frame')", "T001");
+    rejects("scheduler.step(64, 0, 1)", "T006");
+    accepts(
+        "local task, resolve, reject = scheduler.deferred() local done: boolean = resolve('a', 2) local empty: boolean = resolve() local failed: boolean = reject('no') local async function wait(): any return await task end",
+    );
+    // An explicit Task<T> names what the producer promises, as with from_worker.
+    accepts(
+        "local task: Task<string>, resolve = scheduler.deferred() resolve('clicked') local async function wait(): string return await task end",
+    );
+    rejects(
+        "local task: Task<string> = scheduler.deferred() local async function wait(): number return await task end",
+        "T001",
+    );
+    rejects("scheduler.deferred(1)", "T006");
+    rejects("local _, _, reject = scheduler.deferred() reject()", "T006");
+    rejects("local _, resolve = scheduler.deferred() local n: number = resolve(1)", "T001");
+    rejects("local task = scheduler.deferred() task()", "T007");
+}
+#[test]
+fn scheduler_all_and_race_follow_the_tasks_they_are_given() {
+    // all: an array of each Task's first value. Neither pumps the scheduler, so both are fine in async bodies.
+    accepts(
+        "local async function load(n: number): number return n end local async function main(): number local values: {number} = await scheduler.all({load(1), load(2)}) return #values end",
+    );
+    // A variable which holds the Tasks works as a literal does.
+    accepts(
+        "local async function load(n: number): number return n end local jobs: {Task<number>} = {} jobs[#jobs + 1] = load(1) local combined: Task<{number}> = scheduler.all(jobs)",
+    );
+    // Tasks of different kinds: a value may be any of theirs.
+    rejects(
+        "local async function a(): number return 1 end local async function b(): string return 'b' end local async function main(): () local values: {number} = await scheduler.all({a(), b()}) end",
+        "T001",
+    );
+    rejects(
+        "local async function a(): number return 1 end local n: number = scheduler.all({a()})",
+        "T001",
+    );
+    rejects(
+        "local async function a(): number return 1 end local t: Task<{string}> = scheduler.all({a()})",
+        "T001",
+    );
+    // race: whatever the first Task to settle completes with, all its values.
+    accepts(
+        "local async function a(): number return 1 end local async function main(): number return await scheduler.race({a(), a()}) end",
+    );
+    accepts(
+        "local async function pair(): (number, string) return 1, 'a' end local async function main(): (number, string) return await scheduler.race({pair(), pair()}) end",
+    );
+    // A timeout: the timer has no value, so the result may be missing.
+    accepts(
+        "local async function a(): number return 1 end local async function main(): number local value: number? = await scheduler.race({a(), scheduler.sleep(10)}) return value or 0 end",
+    );
+    rejects(
+        "local async function a(): number return 1 end local async function main(): number local value: number = await scheduler.race({a(), scheduler.sleep(10)}) return value end",
+        "T001",
+    );
+    // An array known only at run time.
+    accepts(
+        "local tasks: any = {} local combined: Task<{any}> = scheduler.all(tasks) local first: Task<...any> = scheduler.race(tasks)",
+    );
+    rejects("scheduler.all()", "T006");
+    rejects("scheduler.all({}, {})", "T006");
+    rejects("scheduler.race(1)", "T016");
+    rejects("scheduler.all({1, 2})", "T016");
+    rejects(
+        "local async function a(): number return 1 end scheduler.all(a())",
+        "T016",
+    );
+    rejects(
+        "local async function a(): number return 1 end scheduler.race({first = a()})",
+        "T016",
+    );
+}
+#[test]
 fn await_invalidates_captured_flow_refinements_even_for_existing_tasks() {
     rejects(
         "local value: number? = 1 local async function use(t: Task<>): number if value ~= nil then await t return value end return 0 end",

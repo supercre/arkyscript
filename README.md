@@ -68,9 +68,11 @@ lua.dostring("assert(sum(20, 22) == 42)");
 
 [실행 예제](examples/tasks/README.md)는 정적 import·선언 파일과 함께 제출, 상태 조회, 결과, 취소, 실패를 보여줍니다. `make setup`으로 네이티브 모듈을 준비하고 `make task-test`로 검증합니다. **네이티브 `wait()`는 호출 스레드를 막습니다.** `async/await`에서는 `scheduler.from_worker(handle)`로 연결해 coroutine만 기다리게 할 수 있습니다. 긴 작업의 취소는 `context.checkpoint()`를 사용하는 협력 방식입니다. [Task API·제한·빌드](docs/tasks.md), [요청 기능별 예제 확인표](examples/README.md)를 참고하세요.
 
-`local async function f(): number`를 호출하면 `Task<number>`를 반환합니다. `await`는 async 본문에서 사용하며 새 스레드를 만들지 않습니다. CLI는 `scheduler.run(main())`, 게임 호스트는 매 프레임 `scheduler.step()`으로 진행합니다. [async 규칙·호스트 연결](docs/async-await.md), [기본 예제](examples/async.arky), [worker await 예제](examples/tasks/async.arky)를 제공합니다.
+`local async function f(): number`를 호출하면 `Task<number>`를 반환합니다. `await`는 async 본문에서 사용하며 새 스레드를 만들지 않습니다. CLI는 `scheduler.run(main())`, 게임 호스트는 매 프레임 `scheduler.step()`으로 진행합니다. async 함수는 호출한 자리에서 첫 `await`까지 실행됩니다. `scheduler.sleep(밀리초)`로 기다리고, `scheduler.deferred()`로 콜백이 완료시키는 Task를 만들고, `scheduler.all`·`scheduler.race`로 여러 Task를 함께 기다립니다([타이머 예제](examples/timers.arky)). [async 규칙·호스트 연결](docs/async-await.md), [기본 예제](examples/async.arky), [worker await 예제](examples/tasks/async.arky)를 제공합니다.
 
 `fs.read_file()`과 `net.connect()`, Socket의 `read()`·`write()`도 `Task`를 반환합니다. 파일·DNS는 제한된 작업 풀에서, TCP는 논블로킹 방식으로 진행해 대기 중에도 호스트 루프를 계속 실행할 수 있습니다. [파일·TCP API와 제한](docs/io.md), [동시 읽기·echo 예제](examples/io/README.md)를 제공합니다.
+
+게임 엔진처럼 자기 Lua VM을 가진 호스트는 `runtime/arky_runtime.cpp` 한 파일을 빌드에 넣어 스케줄러·worker Task·I/O·정적 import를 설치합니다. 런타임은 Lua 상태마다 하나이며 프레임마다 `arky::runtime::step(L)`을 부릅니다. [호스트 임베딩](docs/embedding.md)을 따릅니다.
 
 ## 현재 문법
 

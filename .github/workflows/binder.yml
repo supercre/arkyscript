@@ -3,11 +3,14 @@ on:
   push:
     paths:
       - 'binder/**'
-      - 'runtime/task/**'
+      - 'runtime/**'
       - 'tests/task/**'
+      - 'tests/io/**'
+      - 'tests/runtime/**'
       - 'examples/cpp_*.cpp'
       - 'tests/binder/**'
       - 'scripts/test_binder.py'
+      - 'scripts/embed_runtime.py'
       - 'scripts/bootstrap.py'
       - 'scripts/build_common.py'
       - 'dependencies.json'

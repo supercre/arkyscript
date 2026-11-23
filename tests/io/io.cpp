@@ -4,6 +4,9 @@
 #include <cassert>
 #include <iostream>
 
+// The test inspects the module's own state (owner_state, checked ...).
+using namespace arky::io_module;
+
 struct failing_allocator {
     lua_Alloc original;
     void* context;

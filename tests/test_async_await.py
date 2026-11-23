@@ -21,25 +21,36 @@ class AsyncAwaitTests(unittest.TestCase):
 
     def test_shipped_examples(self):
         for source, expected in [
-            ('examples/async.arky', 'scheduled\tqueued\nresult\t72\nframe result\t20\n'),
+            ('examples/async.arky', 'started\twaiting\nresult\t72\nframe result\t72\n'),
             ('examples/tasks/async.arky', 'Async worker sum: 250015000\n'),
+            ('examples/timers.arky', 'countdown\t3\ncountdown\t2\ncountdown\t1\nliftoff\nmessage\tready\n'
+                                     'countdown\t1\ncountdown\t1\nboth\tliftoff\tliftoff\nanswer\tnil\twaiting\n'),
         ]:
             with self.subTest(source=source):
                 result = self.cli('run', support.ROOT / source)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, expected)
 
-    def test_async_creation_is_scheduled_and_frames_share_captured_values(self):
+    def test_async_functions_start_at_the_call_and_frames_share_captured_values(self):
+        # Each call runs up to its first await at once; what follows the await takes a step.
         self.run_source('''
             --!typecheck strict
             local total=0
-            local async function add(n:number):number total=total+n return total end
+            local async function add(n:number):number
+                total=total+n
+                await scheduler.sleep(0)
+                total=total+n
+                return total
+            end
             local a=add(10)
             local b=add(32)
             print(total,a:ready(),scheduler.pending())
             print(scheduler.step(1),total,a:result(),b:ready())
             print(scheduler.step(1),total,b:result(),scheduler.pending())
-        ''', '0\tfalse\t2\ntrue\t10\t10\tfalse\nfalse\t42\t42\t0\n')
+            local async function double(n:number):number return n*2 end
+            local done=double(21)
+            print(done:status(),done:result(),scheduler.pending())
+        ''', '42\tfalse\t4\ntrue\t52\t52\tfalse\nfalse\t84\t84\t0\nsucceeded\t42\t0\n')
 
     def test_multiwaiters_nested_await_and_result_identity(self):
         self.run_source('''
@@ -150,11 +161,11 @@ class AsyncAwaitTests(unittest.TestCase):
             print(scheduler.run(main()),scheduler.run(provider.get()))
         ''', '42\t42\n')
 
-    def test_cancelled_task_does_not_run_and_waiter_can_handle_failure(self):
+    def test_cancelled_task_does_not_continue_and_waiter_can_handle_failure(self):
         self.run_source('''
             --!typecheck strict
             local calls=0
-            local async function work():number calls=calls+1 return 42 end
+            local async function work():number await scheduler.sleep(0) calls=calls+1 return 42 end
             local pending=work()
             print(pending:cancel(),pending:cancel(),pending:status())
             local async function main():()

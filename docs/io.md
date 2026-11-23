@@ -72,7 +72,7 @@ make windows                 # xwin Windows x64 엔진 + 두 DLL
 
 `tynex_io.so` 또는 `tynex_io.dll`을 엔진 옆에 배치한다. `arky run/debug/bundle`은 private native loader로 모듈을 로드하고 읽기 전용 `fs`·`net`을 typed 환경에 제공한다. 기존 `require`나 `package.loaded`를 변경해도 이미 캡처한 내부 함수를 바꾸지는 않는다. Lua 자체를 보안 샌드박스로 만드는 기능은 아니다.
 
-임베딩에서는 모듈 검색 경로를 준비한 뒤 같은 런타임을 주입한다.
+C++ 호스트는 [호스트 임베딩](embedding.md)을 따른다. 두 모듈이 호스트 바이너리에 들어가며, `fs.read_file`이 읽는 바이트를 호스트가 공급할 수도 있다(`file_reader`). Lua만으로 임베딩할 때는 모듈 검색 경로를 준비한 뒤 같은 런타임을 주입한다.
 
 ```lua
 local runtime = assert(loadfile('runtime/async.lua'))()
@@ -85,6 +85,6 @@ local environment = setmetatable({
 runtime.step(64)
 ```
 
-[실행 예제와 로컬 echo 서버](../examples/io/README.md)를 제공한다. 자동 테스트는 임시 파일·로컬 TCP 서버로 바이너리·EOF·동시 진행·취소·시간 제한·번들 소스 맵을 확인한다. Windows 실행 검증은 CI에 연결했다. Android·iOS 빌드/기기 검증과 Cocos 프레임 콜백 통합은 별도 작업이다.
+[실행 예제와 로컬 echo 서버](../examples/io/README.md)를 제공한다. 자동 테스트는 임시 파일·로컬 TCP 서버로 바이너리·EOF·동시 진행·취소·시간 제한·번들 소스 맵을 확인한다. Windows 실행 검증은 CI에 연결했다. Android·iOS는 임베딩 형태로 컴파일만 확인했다. 기기 검증과 Cocos 프레임 콜백 통합은 별도 작업이다.
 
 현재 범위는 파일 읽기와 TCP 클라이언트다. 파일 쓰기, TCP 서버 listen/accept, UDP, HTTP/TLS, 타이머, 대규모 I/O 이벤트 백엔드는 아직 제공하지 않는다.

@@ -14,11 +14,11 @@
 | 스크립트 class | [class.arky](class.arky), [안내](design/class.md) | 실행 가능: 필수 필드·기본값·메서드·명명 타입 |
 | 스크립트 trait·기본 동작 조합 | [traits.arky](traits.arky), [안내](design/traits.md) | 실행 가능: 필수·기본 메서드·복수 trait·충돌 검사 |
 | 값을 담는 enum·Result/Option·match | [설계 예제](design/enum-match.md) | 미구현 |
-| async / await | [async.arky](async.arky), [tasks/async.arky](tasks/async.arky) | 실행 가능: coroutine·Task 타입·worker 연결·오류·취소·프레임 step |
+| async / await | [async.arky](async.arky), [tasks/async.arky](tasks/async.arky), [timers.arky](timers.arky) | 실행 가능: coroutine·Task 타입·worker 연결·오류·취소·프레임 step·타이머·밖에서 완료시키는 Task·all/race |
 | 비동기 파일·TCP I/O | [io/](io/README.md), [files.arky](io/files.arky), [tcp.arky](io/tcp.arky) | 실행 가능: 파일 동시 읽기·Socket·로컬 echo·EOF·연결 닫기 |
 | VS Code·Zed 하이라이트·디버깅 | [debug/](debug/), [에디터](../docs/editors.md), [디버깅](../docs/debugging.md) | 현재 문법 지원; Task worker 디버깅은 미구현 |
 | 공식 엔진 다운로드·업데이트, xwin | [업데이트/플랫폼 안내](../README.md#배포-플랫폼과-공식-소스), [Windows](../docs/windows-build.md) | 원본 수정 없이 빌드·검증 |
-| 64비트 Android/iOS/Linux/Windows | [구현 계획](../docs/implementation-plan.md) | 모바일 앱 임베딩·기기 검증은 미완료 |
+| 64비트 Android/iOS/Linux/Windows | [구현 계획](../docs/implementation-plan.md), [호스트 임베딩](../docs/embedding.md) | 임베딩용 런타임은 모바일에서 컴파일까지 확인, 기기 검증은 미완료 |
 
 Rust는 독립 컴파일러 구현 언어입니다. 아래 설계 예제에 Rust 소유권·대여 규칙을 추가한다는 뜻은 아닙니다. **모든 요청 항목을 문서에 명시했지만 모든 언어 기능이 구현된 상태는 아닙니다.**
 

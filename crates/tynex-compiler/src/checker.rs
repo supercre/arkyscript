@@ -190,10 +190,39 @@ pub fn check(body: &[Stmt], mode: Mode, modules: &BTreeMap<String, Interface>) -
             library(vec![
                 ("run", Type::AsyncRun),
                 ("step", Type::AsyncStep),
+                ("all", Type::AsyncAll),
+                ("race", Type::AsyncRace),
                 ("pending", function(vec![], Type::Number)),
                 (
                     "from_worker",
                     function(vec![Type::Any], Type::Task(Box::new(Pack::one(Type::Any)))),
+                ),
+                // Timers complete with no value: Task<>.
+                (
+                    "sleep",
+                    function(vec![Type::Number], Type::Task(Box::new(Pack::fixed(vec![])))),
+                ),
+                (
+                    "sleep_realtime",
+                    function(vec![Type::Number], Type::Task(Box::new(Pack::fixed(vec![])))),
+                ),
+                // deferred() returns the Task, then resolve(...) and reject(error). The Task is a
+                // dynamic adapter like from_worker: an explicit Task<T> annotation names its result.
+                (
+                    "deferred",
+                    Type::Function(
+                        vec![],
+                        Box::new(Pack::fixed(vec![
+                            Type::Task(Box::new(Pack::one(Type::Any))),
+                            Type::Function(
+                                vec![],
+                                Box::new(Pack::one(Type::Boolean)),
+                                Some(Box::new(Type::Any)),
+                            ),
+                            function(vec![Type::Any], Type::Boolean),
+                        ])),
+                        None,
+                    ),
                 ),
             ]),
         ),
@@ -2250,12 +2279,77 @@ impl Checker<'_> {
                 if self.async_body {
                     self.error("T016","scheduler.step cannot pump the scheduler inside an async function; use await",span.clone());
                 }
+                // step(max_resumes?, elapsed_milliseconds?)
                 self.call(
-                    &function(vec![Type::Number.optional()], Type::Boolean),
+                    &function(
+                        vec![Type::Number.optional(), Type::Number.optional()],
+                        Type::Boolean,
+                    ),
                     arguments,
                     receiver,
                     span,
                 )
+            }
+            Type::AsyncAll | Type::AsyncRace => {
+                let all = *ty == Type::AsyncAll;
+                let name = if all { "scheduler.all" } else { "scheduler.race" };
+                let actual = self.expressions(arguments, &[], None);
+                let dynamic = actual.tail.as_ref().is_some_and(|t| {
+                    **t == Type::Any || **t == Type::Unknown && self.mode == Mode::Gradual
+                });
+                if receiver.is_some()
+                    || actual.values.len() > 1
+                    || !dynamic
+                        && (actual.minimum != 1
+                            || actual.values.len() != 1
+                            || actual.tail.is_some())
+                {
+                    self.error(
+                        "T006",
+                        format!("{name} requires exactly one array of Tasks"),
+                        span.clone(),
+                    );
+                }
+                // The Tasks of the array, joined: what any one of them may complete with.
+                let results = match actual.at(0) {
+                    Type::Table(table) if table.fields.is_empty() => match &table.index {
+                        Some((key, value)) if **key == Type::Number => {
+                            self.task_results(value, span.clone())
+                        }
+                        None => Pack::one(Type::Never),
+                        Some(_) => {
+                            self.error(
+                                "T016",
+                                format!("{name} expects an array of Tasks, got {}", actual.at(0)),
+                                span.clone(),
+                            );
+                            Pack::variadic(Type::Unknown)
+                        }
+                    },
+                    Type::Any => Pack::variadic(Type::Any),
+                    Type::Unknown if self.mode == Mode::Gradual => Pack::variadic(Type::Unknown),
+                    other => {
+                        self.error(
+                            "T016",
+                            format!("{name} expects an array of Tasks, got {other}"),
+                            span.clone(),
+                        );
+                        Pack::variadic(Type::Unknown)
+                    }
+                };
+                if all {
+                    // An array of each Task's first value, in the order given.
+                    let values = Type::Table(
+                        TableType {
+                            fields: BTreeMap::new(),
+                            index: Some((Box::new(Type::Number), Box::new(results.at(0)))),
+                        }
+                        .into(),
+                    );
+                    Pack::one(Type::Task(Box::new(Pack::one(values))))
+                } else {
+                    Pack::one(Type::Task(Box::new(results)))
+                }
             }
             Type::Function(params, returns, variadic) => {
                 let expected: Vec<_> = params.iter().skip(offset).cloned().map(Some).collect();
