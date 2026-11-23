@@ -224,7 +224,13 @@ end
 -- follow real time.
 -- Each clock keeps a binary heap of waiting timers: earliest first, then in the
 -- order they were created. A cancelled timer stays in the heap until it is due.
-local host_clock = {time=0, heap={}, size=0, waiting=0}
+-- Host time moves only when a step begins, so it stands at the start of the
+-- current frame. A host-time timer made inside a step counts from there, as
+-- frame-based games do. One made outside a step (an input handler, a module
+-- being loaded, between frames) is held until the next step and counts from
+-- that step's time: the elapsed time the host passes to it went by, in part or
+-- in full, before the timer existed.
+local host_clock = {time=0, heap={}, size=0, waiting=0, held={}, held_size=0}
 local real_clock = {time=0, heap={}, size=0, waiting=0}
 local timer_order = 0
 local last_real = now and now()
@@ -283,20 +289,53 @@ local function compact(clock)
       if not finished(heap[index]) then push_timer(clock, heap[index]) end
    end
 end
-local function new_timer(clock, due)
+-- Holds a timer until the next step. Cancelled ones are dropped once they
+-- outnumber the waiting timers, as in compact.
+local function hold(clock, state)
+   local held, size = clock.held, clock.held_size
+   if size > 64 and size > 2 * clock.waiting then
+      local kept, count = {}, 0
+      for index = 1, size do
+         if not finished(held[index]) then
+            count = count + 1
+            kept[count] = held[index]
+         end
+      end
+      held, size = kept, count
+      clock.held = held
+   end
+   size = size + 1
+   held[size] = state
+   clock.held_size = size
+end
+-- At the start of a step, after the clock moved: held timers count from now.
+local function release_held(clock)
+   local held, size = clock.held, clock.held_size
+   if size == 0 then return end
+   clock.held, clock.held_size = {}, 0
+   for index = 1, size do
+      local state = held[index]
+      if not finished(state) then
+         state.due = clock.time + state.duration
+         push_timer(clock, state)
+      end
+   end
+end
+local function new_timer(clock, due, length)
    if clock.size > 64 and clock.size > 2 * clock.waiting then compact(clock) end
    timer_order = timer_order + 1
-   local state = {status="waiting", clock=clock, due=due, order=timer_order}
+   local state = {status="waiting", clock=clock, due=due, duration=length, order=timer_order}
    local task = new_task(state)
    clock.waiting = clock.waiting + 1
-   push_timer(clock, state)
+   if due then push_timer(clock, state) else hold(clock, state) end
    return task
 end
 -- The Task completes, with no value, once that much host time has passed.
 -- sleep(0) completes at the next step: "the next frame".
 function scheduler.sleep(milliseconds)
    duration(milliseconds, "scheduler.sleep", 3)
-   return new_timer(host_clock, host_clock.time + milliseconds)
+   if pumping then return new_timer(host_clock, host_clock.time + milliseconds) end
+   return new_timer(host_clock, nil, milliseconds)
 end
 function scheduler.sleep_realtime(milliseconds)
    duration(milliseconds, "scheduler.sleep_realtime", 3)
@@ -311,6 +350,7 @@ local function advance(elapsed)
    elseif real then
       host_clock.time = host_clock.time + (real - last_real)
    end
+   release_held(host_clock)
    if real then
       last_real = real
       real_clock.time = real

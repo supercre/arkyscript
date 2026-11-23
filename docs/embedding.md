@@ -66,6 +66,8 @@ CLI와 달리 검사된 모듈 목록이 없으므로, 로더가 돌려준 내�
 
 `scheduler.sleep(milliseconds)`는 호스트 시간으로 기다린다. 호스트 시간은 `step(L, delta_seconds)`에 넘긴 만큼만 흐르므로, 게임이 일시정지 중에 0을 넘기거나 배속을 곱해 넘기면 타이머에 그대로 적용된다. `delta_seconds` 없이 `step(L)`만 부르면 호스트 시간이 실제 시간을 따른다. `scheduler.sleep_realtime(milliseconds)`는 어느 쪽이든 실제 시간으로 기다린다.
 
+`sleep`은 타이머를 만든 프레임의 시작부터 센다. 프레임 사이에 만든 타이머(예: 호스트가 `import_module`로 모듈을 처음 실행할 때)는 다음 step의 시각부터 센다. 다음 step의 `delta_seconds`는 그 타이머를 만들기 전에 지난 시간을 담고 있기 때문이다.
+
 단위가 다르다는 점에 주의한다. 호스트는 엔진의 프레임 시간 그대로 **초**를 넘기고(`delta_seconds`), 스크립트의 타이머는 **밀리초**를 받는다. 0 이상인 유한한 수가 아닌 `delta_seconds`는 오류다.
 
 `step(L, 1)`처럼 정수를 넘기면 `max_resumes`로 해석된다. 프레임 시간은 `float`나 `double`로 넘긴다.

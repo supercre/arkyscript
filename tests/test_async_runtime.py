@@ -532,16 +532,59 @@ class AsyncRuntimeTests(unittest.TestCase):
             end
             assert(finished == 200 and elapsed <= 10.25)
 
-            -- Timers cancelled long before they are due are not kept until then.
+            -- Timers cancelled long before they are due are not kept until then. They are made
+            -- inside a step, so they go straight into the heap.
             collectgarbage() collectgarbage()
             local before = collectgarbage('count')
-            local kept = scheduler.sleep(3)
-            for index = 1, 200000 do scheduler.sleep(1000000 + index):cancel() end
+            local kept
+            scheduler.create(function()
+                scheduler.await(scheduler.sleep(0))
+                kept = scheduler.sleep(3)
+                for index = 1, 200000 do scheduler.sleep(1000000 + index):cancel() end
+            end)()
+            assert(scheduler.step(64, 0) and kept and not kept:ready())
             collectgarbage() collectgarbage()
             assert(collectgarbage('count') < before + 2048, collectgarbage('count') - before)
             -- The heap was rebuilt many times around a waiting timer: it still completes on time.
             assert(scheduler.step(64, 2.5) and not kept:ready())
             assert(not scheduler.step(64, 0.5) and kept:ready() and scheduler.pending() == 0)
+        """)
+
+    def test_timers_made_outside_a_step_count_from_the_next_step(self):
+        self.lua("""
+            -- Between steps host time stands where the last step left it. The elapsed time of the
+            -- next step went by, in part or in full, before a timer made now existed: it counts
+            -- from that step on.
+            assert(not scheduler.step(64, 0))
+            local outside = scheduler.sleep(100)
+            assert(scheduler.step(64, 150) and not outside:ready())
+            assert(scheduler.step(64, 60) and not outside:ready())
+            assert(not scheduler.step(64, 40) and outside:ready())
+            -- sleep(0) made outside a step completes at the next step.
+            local soon = scheduler.sleep(0)
+            assert(not scheduler.step(64, 5) and soon:ready())
+            -- Made inside a step, a timer counts from that step's time, the start of the frame.
+            local made
+            local maker = scheduler.create(function()
+                scheduler.await(scheduler.sleep(0))
+                made = scheduler.sleep(100)
+                scheduler.await(made)
+            end)()
+            assert(scheduler.step(64, 10) and made and not made:ready())
+            assert(scheduler.step(64, 90) and not made:ready())
+            assert(not scheduler.step(64, 10) and made:ready() and maker:ready())
+            -- A held timer cancelled before the next step never completes, and many of them are not kept.
+            local dropped = scheduler.sleep(1)
+            assert(dropped:cancel())
+            assert(not scheduler.step(64, 10) and dropped:status() == 'cancelled')
+            collectgarbage() collectgarbage()
+            local before = collectgarbage('count')
+            local kept = scheduler.sleep(50)
+            for index = 1, 200000 do scheduler.sleep(index):cancel() end
+            collectgarbage() collectgarbage()
+            assert(collectgarbage('count') < before + 2048, collectgarbage('count') - before)
+            assert(scheduler.step(64, 0) and not kept:ready())
+            assert(not scheduler.step(64, 50) and kept:ready() and scheduler.pending() == 0)
         """)
 
     def test_real_time_timers_ignore_host_time_and_host_time_follows_real_time_by_default(self):
@@ -736,6 +779,8 @@ class AsyncRuntimeTests(unittest.TestCase):
             -- A timeout: the timer wins with no value, and the Task it guarded is still waiting.
             local answer, resolve_answer = scheduler.deferred()
             local guarded = scheduler.race({answer, scheduler.sleep(100)})
+            -- Made outside a step, the timer starts counting at the next step.
+            assert(scheduler.step(64, 0) and guarded:status() == 'waiting')
             assert(scheduler.step(64, 50) and guarded:status() == 'waiting')
             scheduler.step(64, 50)
             assert(guarded:status() == 'succeeded' and select('#', guarded:result()) == 0)
