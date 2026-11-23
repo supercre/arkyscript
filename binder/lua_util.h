@@ -10,6 +10,18 @@
 #include <string_view>
 #include <utility>
 
+// The C++ part of a binder Lua C function runs in a callee marked with this,
+// and the Lua error is raised by the caller, which holds no C++ objects.
+// LuaJIT raises Lua errors as exceptions that unwind C++ frames (SEH on
+// Windows). Compiled with /EHsc, a frame assumes extern "C" functions such as
+// lua_error cannot throw, so a Lua error raised in a frame with C++ objects can
+// run the cleanups of another point of that frame (a destroyed object again).
+#if defined(_MSC_VER) && !defined(__clang__)
+#define ARKY_NOINLINE __declspec(noinline)
+#else
+#define ARKY_NOINLINE __attribute__((noinline))
+#endif
+
 namespace arky {
 class error : public std::runtime_error {
 public:

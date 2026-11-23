@@ -3,21 +3,29 @@
 // Variadic C++ callable dispatch and Lua callback boundaries.
 // Author: eugene.choi.
 #include "lua_arg.h"
+#include <cstddef>
 #include <cstdio>
 #include <functional>
 #include <tuple>
 
 namespace arky::detail {
 // Leave the catch scope before raising a Lua error (also works with longjmp VMs).
-template<auto Function> int boundary(lua_State* L) {
-    char message[1024];
+// Function runs in boundary_call, a frame of its own (see ARKY_NOINLINE); the
+// error is raised here, where no C++ object is alive. -1 means "message set".
+template<auto Function> ARKY_NOINLINE int boundary_call(lua_State* L, char* message, std::size_t size) {
     try {
         return Function(L);
     } catch (const std::exception& exception) {
-        std::snprintf(message, sizeof(message), "%s", exception.what());
+        std::snprintf(message, size, "%s", exception.what());
     } catch (...) {
-        std::snprintf(message, sizeof(message), "%s", "unknown C++ exception");
+        std::snprintf(message, size, "%s", "unknown C++ exception");
     }
+    return -1;
+}
+template<auto Function> int boundary(lua_State* L) {
+    char message[1024];
+    const int results = boundary_call<Function>(L, message, sizeof(message));
+    if (results >= 0) return results;
     lua_pushstring(L, message);
     return lua_error(L);
 }

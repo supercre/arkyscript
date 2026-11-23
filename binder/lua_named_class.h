@@ -900,6 +900,18 @@ template<class Arguments> struct named_variadic : std::false_type {};
 template<class... A> requires (sizeof...(A) > 0)
 struct named_variadic<std::tuple<A...>>
     : std::bool_constant<named_takes_rest<std::tuple_element_t<sizeof...(A) - 1, std::tuple<A...>>>> {};
+// Whether no parameter but the last takes the remaining arguments. A loop over
+// an array instead of a fold over tuple_element_t, which MSVC rejects here.
+template<class Arguments> struct named_rest_is_last : std::true_type {};
+template<class... A> struct named_rest_is_last<std::tuple<A...>> {
+    static constexpr bool check() {
+        constexpr bool rest[] = {named_takes_rest<A>..., false};
+        for (std::size_t i = 0; i + 1 < sizeof...(A); ++i)
+            if (rest[i]) return false;
+        return true;
+    }
+    static constexpr bool value = check();
+};
 
 template<class> struct named_owned_type : std::false_type {};
 template<class C> struct named_owned_type<lua_owned<C>> : std::true_type {};
@@ -1003,7 +1015,7 @@ template<named_kind Kind, bool Chain, class F, std::size_t... I>
 bool named_attempt(lua_State* L, F& function, named_call& call, std::index_sequence<I...>) {
     using traits = function_traits<F>;
     using arguments = typename traits::arguments;
-    static_assert((... && (I + 1 == sizeof...(I) || !named_takes_rest<std::tuple_element_t<I, arguments>>)),
+    static_assert(named_rest_is_last<arguments>::value,
                   "lua_values and lua_rest take the remaining arguments: they must be the last parameter");
     constexpr bool method = Kind == named_kind::method;
     std::tuple<named_arg<std::tuple_element_t<I, arguments>>...> values;
@@ -1065,16 +1077,13 @@ template<named_kind Kind, class F> constexpr bool named_accepts(int count) {
 // object:name(...)) is rejected instead of taking the first argument for the
 // receiver.
 // A C++ exception becomes a Lua error; like every Lua error of this layer it
-// is raised after the callable's arguments and temporaries are destroyed.
-template<named_kind Kind, bool Chain, class... F> int named_dispatch(lua_State* L, F&... functions) {
-    static_assert(Kind != named_kind::method || (... && (function_traits<F>::arity > 0)),
-                  "A typed method needs an explicit receiver parameter");
-    static_assert(Kind != named_kind::method || (... && (function_traits<F>::arity > 1
-                  || !named_variadic<typename function_traits<F>::arguments>::value)),
-                  "The receiver of a typed method cannot be lua_values or lua_rest");
-    char message[512];
+// is raised after the callable's arguments and temporaries are destroyed, by
+// named_dispatch, which holds no C++ objects (see ARKY_NOINLINE).
+inline constexpr int named_thrown = -1, named_expired_receiver = -2, named_no_receiver = -3, named_no_overload = -4;
+template<named_kind Kind, bool Chain, class... F>
+ARKY_NOINLINE int named_dispatch_call(lua_State* L, char* message, std::size_t size, F&... functions) {
     named_call call;
-    bool done = false, thrown = false, receiver = true;
+    bool done = false, receiver = true;
     try {
         reserve(L, 8);
         if constexpr (Kind == named_kind::of_class) receiver = named_class_table(L, 1);
@@ -1082,18 +1091,30 @@ template<named_kind Kind, bool Chain, class... F> int named_dispatch(lua_State* 
         done = receiver && ((named_accepts<Kind, F>(count)
             && named_attempt<Kind, Chain>(L, functions, call, std::make_index_sequence<function_traits<F>::arity>{})) || ...);
     } catch (const std::exception& exception) {
-        std::snprintf(message, sizeof(message), "%s", exception.what());
-        thrown = true;
+        std::snprintf(message, size, "%s", exception.what());
+        return named_thrown;
     } catch (...) {
-        std::snprintf(message, sizeof(message), "%s", "unknown C++ exception");
-        thrown = true;
+        std::snprintf(message, size, "%s", "unknown C++ exception");
+        return named_thrown;
     }
-    if (thrown) {
+    if (done && !call.expired) return call.results;
+    if (call.expired) return named_expired_receiver;
+    return receiver ? named_no_overload : named_no_receiver;
+}
+template<named_kind Kind, bool Chain, class... F> int named_dispatch(lua_State* L, F&... functions) {
+    static_assert(Kind != named_kind::method || (... && (function_traits<F>::arity > 0)),
+                  "A typed method needs an explicit receiver parameter");
+    static_assert(Kind != named_kind::method || (... && (function_traits<F>::arity > 1
+                  || !named_variadic<typename function_traits<F>::arguments>::value)),
+                  "The receiver of a typed method cannot be lua_values or lua_rest");
+    char message[512];
+    const int results = named_dispatch_call<Kind, Chain>(L, message, sizeof(message), functions...);
+    if (results >= 0) return results;
+    if (results == named_thrown) {
         lua_pushstring(L, message);
         return lua_error(L);
     }
-    if (done && !call.expired) return call.results;
-    return named_call_error(L, call.expired, receiver, Kind == named_kind::function);
+    return named_call_error(L, results == named_expired_receiver, results != named_no_receiver, Kind == named_kind::function);
 }
 // Captureless callables need no storage: the thunk itself is the Lua function.
 template<named_kind Kind, bool Chain, class... F> int named_thunk(lua_State* L) {
