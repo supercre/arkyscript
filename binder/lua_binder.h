@@ -58,6 +58,16 @@ public:
     // The same class with typed registration in the form of reg_class<T>: T
     // is bound to the named class, so typed members convert T* and T&.
     template<class T> named_class_of<T> reg_named_class(std::string_view type) { return named_class_of<T>(L_, type); }
+    // A function with the conversions of typed named-class members: objects
+    // of named classes cross as pointers or references and values convert
+    // with named_value. Several callables form an overload set.
+    template<class... F> binder& reg_named_func(std::string_view name, F&&... overloads) {
+        detail::stack_guard stack(L_);
+        detail::reserve(L_, 8);
+        detail::push_named_function<detail::named_kind::function, false>(L_, std::forward<F>(overloads)...);
+        detail::set_path(L_, qualify(name));
+        return *this;
+    }
     // Destruction notice for an object exposed through named_object::push.
     std::size_t invalidate_named_object(void* value, std::string_view type) {
         return named_object::invalidate(L_, value, type);

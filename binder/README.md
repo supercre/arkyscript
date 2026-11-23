@@ -178,6 +178,13 @@ lua.reg_named_class<Node>("cc.Node").chain_void_methods()
 - **인자 변환**은 `arky::named_value<T>`가 담당합니다. 기본 규칙은 raw 바인딩이 쓰는 Lua C API 변환입니다. 숫자는 숫자 문자열을 받고 정수 타입의 범위로 잘라 맞추며, `bool`은 nil을 false로, `std::string`·`const char*`는 숫자와 nil(빈 문자열)을 받습니다. enum은 정수로 변환합니다. 그 밖의 값 타입은 `converter<T>`와 핵심 변환을 사용합니다. 호스트는 스칼라를 포함한 어떤 타입이든 `named_value<T>`를 특수화해 기존 바인딩의 변환과 똑같이 맞출 수 있습니다. `read`는 실패를 반환값으로 알리므로 오버로드 선택에 예외를 쓰지 않습니다.
 - **객체 인자**: 연결된 타입의 포인터 인자는 nil과 만료된 래퍼를 nullptr로 받고(raw 바인딩과 동일), 참조 인자는 살아 있는 객체만 받습니다. receiver가 만료된 객체이면 `expired native object` 오류입니다. 타입 판정에 이름 문자열을 쓰지 않습니다.
 - **결과**: 연결된 타입의 포인터·참조는 같은 포인터의 래퍼를 재사용합니다. 다형 타입은 `typeid`로 실제 객체의 등록된 클래스를 찾아 노출하며, 등록되지 않은 파생 타입은 정적 타입의 클래스로 노출합니다. `lua_owned<T>{pointer}`를 반환하면 Lua가 소유하고 collector가 해제합니다. `named_object::push(L, pointer)`도 같은 경로를 사용합니다.
+- **값 여러 개**: `arky::lua_values<T>`를 마지막 매개변수로 쓰면 남은 인자를 모두 `T`로 변환해 받습니다(`Menu:create(item, ...)`). 결과 타입으로 쓰면 항목마다 Lua 값 하나를 반환하고, `std::tuple<...>` 결과도 요소마다 값 하나를 반환합니다. `.chain_void_methods()`의 receiver 반환은 `void` 결과에만 적용됩니다.
+- **스택에 둔 채로**: 자주 불리는 함수는 변환과 할당을 피할 수 있습니다. 마지막 매개변수 `arky::lua_rest`는 남은 인자를 변환하지 않고 스택 위치(`state`, `index(i)`, `size()`)로 받습니다. 결과 타입 `arky::lua_pushed{count}`는 callable이 직접 스택에 올린 위쪽 `count`개 값을 반환합니다. `lua_values<T>`는 값을 벡터에 담으므로 호출마다 할당이 생깁니다.
+- **컨테이너와 optional**: `std::optional<T>`는 nil과 빈 값을 서로 바꾸고, `std::vector<T>`는 배열 테이블과 서로 바꿉니다. 요소는 `named_value<T>`와 연결된 클래스 규칙으로 변환하며, 결과 배열에서 null 포인터 요소는 넣지 않습니다.
+- **프로퍼티**: `reg_prop(name, getter[, setter])`의 getter·setter는 멤버 함수 포인터 외에 receiver를 첫 인자로 받는 callable도 됩니다(`[](T* self) -> double`, `[](T* self, double value)`). 인자·결과 변환은 메서드와 같습니다.
+- **자유 함수**: `binder::reg_named_func("cc.utils.find", callable...)`은 클래스에 속하지 않는 함수를 같은 변환 규칙과 오버로드 선택으로 등록합니다. 이름의 경로 테이블은 없으면 만듭니다.
+- **raw 코드에서 읽기**: `arky::named_read(L, index, out)`은 Lua 스택을 직접 다루는 코드(raw 콜백, 호스트 연결 코드)가 스택의 값을 typed 매개변수와 같은 규칙으로 읽게 합니다. 변환할 수 없으면 `false`이고, 연결된 클래스의 포인터는 nil과 만료된 래퍼를 nullptr로 받습니다.
+- **포인터를 값으로**: 연결된 클래스가 아닌 타입의 포인터는 호스트가 `named_value<X*>`를 특수화하면 값처럼 변환됩니다(구조체 포인터를 테이블로 전달하는 경우).
 - `reg_native_lifetime(pin, hook)`은 native가 소유하는 계층의 래퍼 수명을 정합니다. 래퍼를 새로 만들 때 `hook(object)`을 부르고, `pin`이면 `invalidate`까지 래퍼와 필드를 유지합니다. 가장 가까운 클래스의 설정을 사용합니다.
 - C++ 예외는 Lua 오류가 됩니다. 맞는 오버로드가 없으면 `invalid arguments to 'name'` 오류입니다.
 - `reg_static`으로 등록한 함수는 클래스에 대해 호출합니다(`Class:name(...)`). `Class.name(...)`이나 `object:name(...)`처럼 클래스가 아닌 값이 receiver 자리에 오면 첫 인자를 건너뛰지 않고 오류로 처리합니다.

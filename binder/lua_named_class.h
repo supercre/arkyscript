@@ -694,6 +694,27 @@ namespace arky {
 // class collector releases it.
 template<class T> struct lua_owned { T* value; };
 
+// A run of Lua values. As the last parameter of a typed callable it takes
+// every remaining argument; as a result it yields one Lua value per element.
+template<class T> struct lua_values : std::vector<T> { using std::vector<T>::vector; };
+
+// Every argument from its position on, left on the Lua stack: nothing is
+// converted or allocated. Only the last parameter of a typed callable can be
+// one (or a type derived from it). The stack indices are valid for the call.
+struct lua_rest {
+    lua_State* state = nullptr;
+    int first = 0;  // stack index of the first remaining argument
+    int count = 0;
+    [[nodiscard]] std::size_t size() const noexcept { return static_cast<std::size_t>(count); }
+    [[nodiscard]] bool empty() const noexcept { return count == 0; }
+    // Stack index of the i-th remaining argument, counted from 0.
+    [[nodiscard]] int index(std::size_t i) const noexcept { return first + static_cast<int>(i); }
+};
+
+// Result of a typed callable that pushed its values itself: the top count
+// values of the Lua stack are returned. For calls that must not allocate.
+struct lua_pushed { int count = 0; };
+
 // Conversion of a value type for typed members of named classes. The primary
 // template follows the Lua C API coercions that raw bindings rely on: numbers
 // accept numeric strings and saturate to the target type, bool accepts nil,
@@ -702,8 +723,11 @@ template<class T> struct lua_owned { T* value; };
 // to match the conversions of bindings it replaces: read reports failure
 // through its result and push adds one value.
 template<class T, class = void> struct named_value {
-    // Plain classes are not values: they are objects of a bound named class.
-    static constexpr bool enabled = !detail::object_type<T>;
+    // Plain classes are not values: they and pointers to them are objects of
+    // a bound named class. A host that passes such a pointer as a value (a
+    // handle, a table built from it) specializes named_value for the pointer type.
+    static constexpr bool enabled = !detail::object_type<T>
+        && !detail::object_type<std::remove_cv_t<std::remove_pointer_t<T>>>;
     static bool read(lua_State* L, int index, T& out) {
         if constexpr (std::is_same_v<T, bool>) {
             const int type = lua_type(L, index);
@@ -746,10 +770,39 @@ private:
         }
     }
 };
+// nil is an empty optional; a present value converts as T.
+template<class T> struct named_value<std::optional<T>> {
+    static constexpr bool enabled = true;
+    static bool read(lua_State* L, int index, std::optional<T>& out) {
+        if (lua_isnoneornil(L, index)) { out.reset(); return true; }
+        T item{};
+        if (!named_value<T>::read(L, index, item)) return false;
+        out = std::move(item);
+        return true;
+    }
+    static void push(lua_State* L, const std::optional<T>& value) {
+        if (value) named_value<T>::push(L, *value); else lua_pushnil(L);
+    }
+};
+// A Lua array. Elements convert like arguments and results of typed members,
+// so they can be values or pointers to objects of bound named classes. A null
+// pointer would end the array and is left out.
+template<class T, class A> struct named_value<std::vector<T, A>> {
+    static constexpr bool enabled = true;
+    static bool read(lua_State* L, int index, std::vector<T, A>& out);
+    static void push(lua_State* L, const std::vector<T, A>& value);
+};
+// Converted by the call itself: see lua_values.
+template<class T> struct named_value<lua_values<T>> { static constexpr bool enabled = true; };
 } // namespace arky
 
 namespace arky::detail {
 template<class C> inline constexpr bool named_bound_type = std::is_class_v<C> && !named_value<C>::enabled;
+template<class> struct named_values_type : std::false_type {};
+template<class T> struct named_values_type<lua_values<T>> : std::true_type { using value_type = T; };
+template<class T> inline constexpr bool named_rest_type = std::is_base_of_v<lua_rest, T>;
+template<class> struct named_tuple_type : std::false_type {};
+template<class... T> struct named_tuple_type<std::tuple<T...>> : std::true_type {};
 
 // One parameter of a typed member: where its value is read from and how it is
 // handed to the callable. Values live in the reader for the call.
@@ -764,7 +817,7 @@ template<class P, class = void> struct named_arg {
     P get() { if constexpr (std::is_reference_v<P>) return value; else return std::move(value); }
 };
 // nil and an expired wrapper arrive as nullptr, as raw bindings pass them.
-template<class C> struct named_arg<C*, std::enable_if_t<named_bound_type<std::remove_cv_t<C>>>> {
+template<class C> struct named_arg<C*, std::enable_if_t<named_bound_type<std::remove_cv_t<C>> && !named_value<C*>::enabled>> {
     static constexpr bool object = true;
     C* value = nullptr;
     bool live = true;
@@ -804,16 +857,82 @@ template<> struct named_arg<const char*, void> {
     }
     const char* get() { return value; }
 };
+// Every argument from its position on. Only the last parameter can be one.
+template<class P> struct named_arg<P, std::enable_if_t<named_values_type<std::remove_cvref_t<P>>::value>> {
+    using value_type = std::remove_cvref_t<P>;
+    static_assert(!std::is_lvalue_reference_v<P> || std::is_const_v<std::remove_reference_t<P>>,
+                  "Take lua_values by value or const reference");
+    static constexpr bool object = false;
+    value_type value;
+    bool read(lua_State* L, int index) {
+        const int top = lua_gettop(L);
+        if (top >= index) value.reserve(static_cast<std::size_t>(top - index + 1));
+        for (int i = index; i <= top; ++i) {
+            named_arg<typename named_values_type<value_type>::value_type> item;
+            if (!item.read(L, i)) return false;
+            value.push_back(item.get());
+        }
+        return true;
+    }
+    P get() { if constexpr (std::is_reference_v<P>) return value; else return std::move(value); }
+};
+// The remaining arguments as they are on the stack.
+template<class P> struct named_arg<P, std::enable_if_t<named_rest_type<std::remove_cvref_t<P>>>> {
+    using value_type = std::remove_cvref_t<P>;
+    static_assert(!std::is_lvalue_reference_v<P> || std::is_const_v<std::remove_reference_t<P>>,
+                  "Take lua_rest by value or const reference");
+    static constexpr bool object = false;
+    value_type value;
+    bool read(lua_State* L, int index) {
+        const int top = lua_gettop(L);
+        value.state = L;
+        value.first = index;
+        value.count = top >= index ? top - index + 1 : 0;
+        return true;
+    }
+    P get() { return value; }
+};
+// Whether a parameter takes every argument from its position on.
+template<class P> inline constexpr bool named_takes_rest =
+    named_values_type<std::remove_cvref_t<P>>::value || named_rest_type<std::remove_cvref_t<P>>;
+// Whether the last parameter of a callable takes the remaining arguments.
+template<class Arguments> struct named_variadic : std::false_type {};
+template<class... A> requires (sizeof...(A) > 0)
+struct named_variadic<std::tuple<A...>>
+    : std::bool_constant<named_takes_rest<std::tuple_element_t<sizeof...(A) - 1, std::tuple<A...>>>> {};
 
 template<class> struct named_owned_type : std::false_type {};
 template<class C> struct named_owned_type<lua_owned<C>> : std::true_type {};
 // R is the declared result type, so a returned reference is exposed in place.
-template<class R> void named_push_result(lua_State* L, std::type_identity_t<R> value) {
+// Returns the number of Lua values pushed: one, except for std::tuple (one per
+// element) and lua_values (one per item).
+template<class R> int named_push_result(lua_State* L, std::type_identity_t<R> value) {
     using U = std::remove_cvref_t<R>;
-    if constexpr (named_owned_type<U>::value) {
+    if constexpr (named_tuple_type<U>::value) {
+        reserve(L, static_cast<int>(std::tuple_size_v<U>) + 4);
+        return std::apply([L](const auto&... item) {
+            static_assert((... && (!named_tuple_type<std::remove_cvref_t<decltype(item)>>::value
+                                   && !named_values_type<std::remove_cvref_t<decltype(item)>>::value)),
+                          "Results of several values do not nest");
+            (named_push_result<std::remove_cvref_t<decltype(item)>>(L, item), ...);
+            return static_cast<int>(sizeof...(item));
+        }, value);
+    } else if constexpr (named_values_type<U>::value) {
+        using item_type = typename named_values_type<U>::value_type;
+        static_assert(!named_tuple_type<item_type>::value && !named_values_type<item_type>::value,
+                      "Results of several values do not nest");
+        if (value.size() > 4096) throw error("too many Lua results");
+        reserve(L, static_cast<int>(value.size()) + 4);
+        for (std::size_t i = 0; i < value.size(); ++i) named_push_result<item_type>(L, value[i]);
+        return static_cast<int>(value.size());
+    } else if constexpr (std::is_same_v<U, lua_pushed>) {
+        if (value.count < 0 || value.count > lua_gettop(L)) throw error("lua_pushed counts values that are not on the stack");
+        return value.count;
+    } else if constexpr (named_owned_type<U>::value) {
         if (!named_push_object(L, value.value)) throw error("C++ type is not bound to a named class");
         named_take_ownership(L, -1);
-    } else if constexpr (std::is_pointer_v<U> && named_bound_type<std::remove_cv_t<std::remove_pointer_t<U>>>) {
+    } else if constexpr (std::is_pointer_v<U> && !named_value<U>::enabled
+                         && named_bound_type<std::remove_cv_t<std::remove_pointer_t<U>>>) {
         if (!named_push_object(L, value)) throw error("C++ type is not bound to a named class");
     } else if constexpr (std::is_same_v<U, const char*> || std::is_same_v<U, char*>) {
         lua_pushstring(L, value);
@@ -823,19 +942,74 @@ template<class R> void named_push_result(lua_State* L, std::type_identity_t<R> v
     } else {
         named_value<U>::push(L, value);
     }
+    return 1;
+}
+} // namespace arky::detail
+
+namespace arky {
+// For code that works on the Lua stack itself (raw callbacks, host glue):
+// reads the value at index the way a typed parameter of type T receives it.
+// Returns false when the value does not convert. A pointer to an object of a
+// bound class is nullptr for nil and for an invalidated wrapper.
+template<class T> [[nodiscard]] bool named_read(lua_State* L, int index, T& out) {
+    detail::named_arg<T> argument;
+    if (!argument.read(L, index)) return false;
+    out = argument.get();
+    return true;
 }
 
+template<class T, class A> bool named_value<std::vector<T, A>>::read(lua_State* L, int index, std::vector<T, A>& out) {
+    if (lua_type(L, index) != LUA_TTABLE || !lua_checkstack(L, 4)) return false;
+    index = detail::absolute_index(L, index);
+    const std::size_t count = lua_objlen(L, index);
+    out.clear();
+    out.reserve(count);
+    for (std::size_t i = 1; i <= count; ++i) {
+        lua_rawgeti(L, index, static_cast<int>(i));
+        detail::named_arg<T> item;
+        const bool fits = item.read(L, lua_gettop(L));
+        if (fits) out.push_back(item.get());
+        lua_pop(L, 1);
+        if (!fits) return false;
+    }
+    return true;
+}
+template<class T, class A> void named_value<std::vector<T, A>>::push(lua_State* L, const std::vector<T, A>& value) {
+    static_assert(!detail::named_bound_type<T>, "Arrays hold values or pointers to objects of bound named classes");
+    if (value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) - 1)
+        throw error("array is too large for a Lua table");
+    detail::reserve(L, 6);
+    lua_createtable(L, static_cast<int>(value.size()), 0);
+    int count = 0;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        if constexpr (std::is_pointer_v<T>) {
+            if (!value[i]) continue;
+        }
+        detail::named_push_result<T>(L, value[i]);
+        lua_rawseti(L, -2, ++count);
+    }
+}
+} // namespace arky
+
+namespace arky::detail {
 struct named_call { int results = 0; bool expired = false; };
+// How a typed callable is called from Lua: as obj:name(...) with the receiver
+// as its first parameter, as Class:name(...) with the class table in slot 1,
+// or as a plain function whose parameters are all the arguments.
+enum class named_kind { method, of_class, function };
 // Converts the arguments of one overload and calls it. A false result means
 // the arguments do not fit and the next overload is tried.
-template<bool Method, bool Chain, class F, std::size_t... I>
+template<named_kind Kind, bool Chain, class F, std::size_t... I>
 bool named_attempt(lua_State* L, F& function, named_call& call, std::index_sequence<I...>) {
     using traits = function_traits<F>;
     using arguments = typename traits::arguments;
+    static_assert((... && (I + 1 == sizeof...(I) || !named_takes_rest<std::tuple_element_t<I, arguments>>)),
+                  "lua_values and lua_rest take the remaining arguments: they must be the last parameter");
+    constexpr bool method = Kind == named_kind::method;
     std::tuple<named_arg<std::tuple_element_t<I, arguments>>...> values;
-    const int first = Method ? 1 : 2;
+    const int first = Kind == named_kind::of_class ? 2 : 1;
     if (!(std::get<I>(values).read(L, first + static_cast<int>(I)) && ...)) {
-        if constexpr (Method && sizeof...(I) > 0) {
+        if constexpr (method && sizeof...(I) > 0) {
             // A receiver that is the right kind of object but no longer alive ends the call.
             using receiver = std::tuple_element_t<0, std::tuple<named_arg<std::tuple_element_t<I, arguments>>...>>;
             if constexpr (receiver::object) {
@@ -844,7 +1018,7 @@ bool named_attempt(lua_State* L, F& function, named_call& call, std::index_seque
         }
         return false;
     }
-    if constexpr (Method && sizeof...(I) > 0) {
+    if constexpr (method && sizeof...(I) > 0) {
         using receiver = std::tuple_element_t<0, std::tuple<named_arg<std::tuple_element_t<I, arguments>>...>>;
         if constexpr (receiver::object) {
             if (!std::get<0>(values).live) { call.expired = true; return true; }
@@ -858,17 +1032,16 @@ bool named_attempt(lua_State* L, F& function, named_call& call, std::index_seque
         if (Chain) lua_settop(L, 1);
         call.results = Chain ? 1 : 0;
     } else {
-        named_push_result<typename traits::result>(L, function(std::get<I>(values).get()...));
-        call.results = 1;
+        call.results = named_push_result<typename traits::result>(L, function(std::get<I>(values).get()...));
     }
     return true;
 }
-inline int named_call_error(lua_State* L, bool expired, bool receiver = true) {
+inline int named_call_error(lua_State* L, bool expired, bool receiver = true, bool function = false) {
     if (expired) return luaL_error(L, "expired native object");
     lua_Debug info{};
     const char* name = lua_getstack(L, 0, &info) && lua_getinfo(L, "n", &info) && info.name ? info.name : "?";
     if (!receiver) return luaL_error(L, "'%s' is called on a class: Class:%s(...)", name, name);
-    return luaL_error(L, "invalid arguments to '%s' (%d given)", name, lua_gettop(L) - 1);
+    return luaL_error(L, "invalid arguments to '%s' (%d given)", name, lua_gettop(L) - (function ? 0 : 1));
 }
 // Whether the value is the public table of a named class: the receiver of Class:name(...).
 inline bool named_class_table(lua_State* L, int index) {
@@ -879,23 +1052,35 @@ inline bool named_class_table(lua_State* L, int index) {
     lua_pop(L, 2);
     return same;
 }
-// Overloads are tried in registration order among those with the given
-// argument count. Slot 1 is the receiver: the object, or the class for statics.
-// A static called without its class (Class.name(...), object:name(...)) is
-// rejected instead of taking the first argument for the receiver.
+// Whether count arguments can be the parameters of F that Lua supplies.
+template<named_kind Kind, class F> constexpr bool named_accepts(int count) {
+    using arguments = typename function_traits<F>::arguments;
+    const int fixed = static_cast<int>(function_traits<F>::arity) - (Kind == named_kind::method ? 1 : 0)
+        - (named_variadic<arguments>::value ? 1 : 0);
+    return named_variadic<arguments>::value ? count >= fixed : count == fixed;
+}
+// Overloads are tried in registration order among those that take the given
+// argument count. For members slot 1 is the receiver: the object, or the class
+// for Class:name(...). A member of a class called without it (Class.name(...),
+// object:name(...)) is rejected instead of taking the first argument for the
+// receiver.
 // A C++ exception becomes a Lua error; like every Lua error of this layer it
 // is raised after the callable's arguments and temporaries are destroyed.
-template<bool Method, bool Chain, class... F> int named_dispatch(lua_State* L, F&... functions) {
-    static_assert(!Method || (... && (function_traits<F>::arity > 0)), "A typed method needs an explicit receiver parameter");
+template<named_kind Kind, bool Chain, class... F> int named_dispatch(lua_State* L, F&... functions) {
+    static_assert(Kind != named_kind::method || (... && (function_traits<F>::arity > 0)),
+                  "A typed method needs an explicit receiver parameter");
+    static_assert(Kind != named_kind::method || (... && (function_traits<F>::arity > 1
+                  || !named_variadic<typename function_traits<F>::arguments>::value)),
+                  "The receiver of a typed method cannot be lua_values or lua_rest");
     char message[512];
     named_call call;
     bool done = false, thrown = false, receiver = true;
     try {
         reserve(L, 8);
-        if constexpr (!Method) receiver = named_class_table(L, 1);
-        const int count = lua_gettop(L) - 1;
-        done = receiver && ((static_cast<int>(function_traits<F>::arity) - (Method ? 1 : 0) == count
-            && named_attempt<Method, Chain>(L, functions, call, std::make_index_sequence<function_traits<F>::arity>{})) || ...);
+        if constexpr (Kind == named_kind::of_class) receiver = named_class_table(L, 1);
+        const int count = lua_gettop(L) - (Kind == named_kind::function ? 0 : 1);
+        done = receiver && ((named_accepts<Kind, F>(count)
+            && named_attempt<Kind, Chain>(L, functions, call, std::make_index_sequence<function_traits<F>::arity>{})) || ...);
     } catch (const std::exception& exception) {
         std::snprintf(message, sizeof(message), "%s", exception.what());
         thrown = true;
@@ -908,27 +1093,27 @@ template<bool Method, bool Chain, class... F> int named_dispatch(lua_State* L, F
         return lua_error(L);
     }
     if (done && !call.expired) return call.results;
-    return named_call_error(L, call.expired, receiver);
+    return named_call_error(L, call.expired, receiver, Kind == named_kind::function);
 }
 // Captureless callables need no storage: the thunk itself is the Lua function.
-template<bool Method, bool Chain, class... F> int named_thunk(lua_State* L) {
+template<named_kind Kind, bool Chain, class... F> int named_thunk(lua_State* L) {
     std::tuple<F...> functions;
-    return std::apply([L](F&... each) { return named_dispatch<Method, Chain, F...>(L, each...); }, functions);
+    return std::apply([L](F&... each) { return named_dispatch<Kind, Chain, F...>(L, each...); }, functions);
 }
-template<bool Method, bool Chain, class... F> int named_closure(lua_State* L) {
+template<named_kind Kind, bool Chain, class... F> int named_closure(lua_State* L) {
     auto* functions = static_cast<std::tuple<F...>*>(lua_touserdata(L, lua_upvalueindex(1)));
-    return std::apply([L](F&... each) { return named_dispatch<Method, Chain, F...>(L, each...); }, *functions);
+    return std::apply([L](F&... each) { return named_dispatch<Kind, Chain, F...>(L, each...); }, *functions);
 }
-template<bool Method, bool Chain, class... F> void push_named_function(lua_State* L, F&&... functions) {
+template<named_kind Kind, bool Chain, class... F> void push_named_function(lua_State* L, F&&... functions) {
     static_assert(sizeof...(F) > 0, "Register at least one callable");
     using pack = std::tuple<std::decay_t<F>...>;
     static_assert(std::is_trivially_destructible_v<pack>,
                   "Typed members of named classes hold no resources: keep state in the bound object");
     if constexpr ((... && (std::is_empty_v<std::decay_t<F>> && std::is_default_constructible_v<std::decay_t<F>>))) {
-        lua_pushcfunction(L, (named_thunk<Method, Chain, std::decay_t<F>...>));
+        lua_pushcfunction(L, (named_thunk<Kind, Chain, std::decay_t<F>...>));
     } else {
         ::new (lua_newuserdata(L, sizeof(pack))) pack(std::forward<F>(functions)...);
-        lua_pushcclosure(L, (named_closure<Method, Chain, std::decay_t<F>...>), 1);
+        lua_pushcclosure(L, (named_closure<Kind, Chain, std::decay_t<F>...>), 1);
     }
 }
 // Member function pointers become callables with an explicit receiver.
@@ -947,7 +1132,7 @@ template<class T, class R, class C, class... A> auto named_member(R (C::*functio
 // A raw variable getter receives (receiver, name); the typed getter sees the receiver only.
 template<class F> int named_getter(lua_State* L) {
     lua_settop(L, 1);
-    return named_dispatch<true, false, F>(L, *static_cast<F*>(lua_touserdata(L, lua_upvalueindex(1))));
+    return named_dispatch<named_kind::method, false, F>(L, *static_cast<F*>(lua_touserdata(L, lua_upvalueindex(1))));
 }
 } // namespace arky::detail
 
@@ -1072,13 +1257,13 @@ public:
     // bound to a named class, or a host value type. Several callables form an
     // overload set: the first one that fits the argument count and types runs.
     template<class... F> named_class& reg_method(const char* name, F&&... overloads) {
-        put(nullptr, name, [&] { detail::push_named_function<true, false>(L_, std::forward<F>(overloads)...); });
+        put(nullptr, name, [&] { detail::push_named_function<detail::named_kind::method, false>(L_, std::forward<F>(overloads)...); });
         return *this;
     }
     // Typed callables without a receiver, called as Class:name(...): slot 1
     // is the class table. Any other receiver is an error.
     template<class... F> named_class& reg_static(const char* name, F&&... overloads) {
-        put(nullptr, name, [&] { detail::push_named_function<false, false>(L_, std::forward<F>(overloads)...); });
+        put(nullptr, name, [&] { detail::push_named_function<detail::named_kind::of_class, false>(L_, std::forward<F>(overloads)...); });
         return *this;
     }
     template<class V> named_class& reg_value(const char* name, V&& value) {
@@ -1478,7 +1663,7 @@ public:
     // Typed callables with an explicit receiver; several form an overload set.
     template<class... F> named_class_of& reg_method(const char* name, F&&... overloads) {
         class_.put(nullptr, name, [&] {
-            detail::push_named_function<true, Chain>(class_.L_, std::forward<F>(overloads)...);
+            detail::push_named_function<detail::named_kind::method, Chain>(class_.L_, std::forward<F>(overloads)...);
         });
         return *this;
     }
@@ -1491,7 +1676,7 @@ public:
     // Class:name(...) functions without a receiver, such as factories.
     template<class... F> named_class_of& reg_static(const char* name, F&&... overloads) {
         class_.put(nullptr, name, [&] {
-            detail::push_named_function<false, Chain>(class_.L_, std::forward<F>(overloads)...);
+            detail::push_named_function<detail::named_kind::of_class, Chain>(class_.L_, std::forward<F>(overloads)...);
         });
         return *this;
     }
@@ -1503,17 +1688,32 @@ public:
             setter(name, [member](T& self, const V& value) { self.*member = value; });
         return *this;
     }
+    // A property read as object.name and assigned as object.name = value.
+    // The getter and the setter are member functions of T or of its bases, or
+    // callables with an explicit receiver: getter(receiver) and
+    // setter(receiver, value). Without a setter an assignment becomes an
+    // instance field.
     template<class G> named_class_of& reg_prop(const char* name, G getter) {
-        static_assert(std::is_member_function_pointer_v<G> && detail::function_traits<G>::arity == 0);
-        if (!getter) throw error("cannot register a null property getter");
-        property(name, detail::named_member<T>(getter));
+        if constexpr (std::is_member_function_pointer_v<G>) {
+            static_assert(detail::function_traits<G>::arity == 0, "A property getter takes no arguments");
+            if (!getter) throw error("cannot register a null property getter");
+            property(name, detail::named_member<T>(getter));
+        } else {
+            static_assert(detail::function_traits<G>::arity == 1, "A property getter takes its receiver only");
+            property(name, std::move(getter));
+        }
         return *this;
     }
     template<class G, class S> named_class_of& reg_prop(const char* name, G getter, S setter_function) {
-        static_assert(std::is_member_function_pointer_v<S> && detail::function_traits<S>::arity == 1);
-        if (!setter_function) throw error("cannot register a null property setter");
-        reg_prop(name, getter);
-        setter(name, detail::named_member<T>(setter_function));
+        reg_prop(name, std::move(getter));
+        if constexpr (std::is_member_function_pointer_v<S>) {
+            static_assert(detail::function_traits<S>::arity == 1, "A property setter takes the new value");
+            if (!setter_function) throw error("cannot register a null property setter");
+            setter(name, detail::named_member<T>(setter_function));
+        } else {
+            static_assert(detail::function_traits<S>::arity == 2, "A property setter takes its receiver and the new value");
+            setter(name, std::move(setter_function));
+        }
         return *this;
     }
     // See named_class::reg_native_lifetime. exposed is a captureless callable
@@ -1552,7 +1752,7 @@ private:
     }
     template<class F> void setter(const char* name, F function) {
         class_.put(&detail::named_setters_key, name, [&] {
-            detail::push_named_function<true, false>(class_.L_, std::move(function));
+            detail::push_named_function<detail::named_kind::method, false>(class_.L_, std::move(function));
         });
     }
     named_class class_;

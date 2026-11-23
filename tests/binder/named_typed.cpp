@@ -1,7 +1,10 @@
 #include "binder/lua_binder.h"
+#include <cmath>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace arky;
@@ -95,6 +98,20 @@ template<> struct named_value<Vec2> {
         lua_setfield(L, -2, "x");
         lua_pushnumber(L, value.y);
         lua_setfield(L, -2, "y");
+    }
+};
+// A pointer type the host passes as a value instead of as an object.
+template<> struct named_value<const Bounds*> {
+    static constexpr bool enabled = true;
+    static bool read(lua_State* L, int index, const Bounds*& out) {
+        static Bounds unit;
+        if (!lua_isnumber(L, index)) return false;
+        unit.width = unit.height = static_cast<float>(lua_tonumber(L, index));
+        out = &unit;
+        return true;
+    }
+    static void push(lua_State* L, const Bounds* const& value) {
+        if (value) lua_pushnumber(L, value->area()); else lua_pushnil(L);
     }
 };
 } // namespace arky
@@ -407,6 +424,275 @@ void classes_bound_by_name() {
     for (Ref* ref : created) delete ref;
     check(Ref::live == 0, "the host released its objects");
 }
+// Arguments and results that are not one value each: every remaining
+// argument, several results, arrays and optional values.
+void several_values() {
+    const int before = Ref::live;
+    std::vector<Ref*> created;
+    {
+        state vm;
+        lua_State* L = vm.get();
+        luaL_openlibs(L);
+        binder lua(L);
+        register_engine(lua);
+        auto* parent = new Node;
+        created.push_back(parent);
+        check(named_object::push(L, parent), "expose the parent");
+        lua_setglobal(L, "parent");
+        lua.reg_named_class<Node>("cc.Node").chain_void_methods()
+            // The last parameter takes what is left, also nothing.
+            .reg_method("addChildren", [](Node* self, lua_values<Node*> children) {
+                for (Node* child : children) self->addChild(child);
+            })
+            .reg_method("sum",
+                [](Node*, int first) { return first * 100; },                  // an exact overload registered first wins
+                [](Node*, int first, const lua_values<double>& rest) {
+                    double total = first;
+                    for (double value : rest) total += value;
+                    return total;
+                })
+            .reg_static("count", [](lua_values<std::string> names) { return static_cast<int>(names.size()); })
+            // One Lua value per tuple element or per item.
+            .reg_method("getXY", [](Node* self) { return std::tuple<float, float>(self->position.x, self->position.y); })
+            .reg_method("describe", [](Node* self) { return std::tuple<Node*, std::string, bool>(self->parent, self->name, self->visible); })
+            .reg_method("tags", [](Node* self) {
+                lua_values<int> tags;
+                for (Node* child : self->children) tags.push_back(child->tag);
+                return tags;
+            })
+            // Arrays of objects and values, and values that may be absent.
+            .reg_method("getChildren", [](Node* self) { return self->children; })
+            .reg_method("setChildren", [](Node* self, const std::vector<Node*>& children) {
+                self->children.clear();
+                for (Node* child : children) self->addChild(child);
+            })
+            .reg_method("orders", [](Node* self) {
+                std::vector<int> orders;
+                for (Node* child : self->children) orders.push_back(child->order);
+                return orders;
+            })
+            .reg_method("setOrders", [](Node* self, const std::vector<int>& orders) {
+                for (std::size_t i = 0; i < orders.size() && i < self->children.size(); ++i) self->children[i]->order = orders[i];
+            })
+            .reg_method("firstTag", [](Node* self) -> std::optional<int> {
+                if (self->children.empty()) return std::nullopt;
+                return self->children.front()->tag;
+            })
+            .reg_method("moveBy", [](Node* self, std::optional<Vec2> delta) {
+                if (delta) self->position = {self->position.x + delta->x, self->position.y + delta->y};
+            })
+            // Properties from callables with an explicit receiver.
+            .reg_prop("childCount", [](const Node* self) { return static_cast<int>(self->children.size()); })
+            .reg_prop("x", [](Node* self) { return self->position.x; }, [](Node* self, float x) { self->position.x = x; });
+        lua.dostring(R"lua(
+            local a, b, c = cc.Sprite:create('a.png'), cc.Node:create(), cc.Node:create()
+            a:setTag(1); b:setTag(2); c:setTag(3)
+            assert(parent:addChildren() == parent and parent.childCount == 0)
+            assert(parent:addChildren(a, b, c) == parent and parent.childCount == 3)
+            assert(not pcall(parent.addChildren, parent, a, 'no object'))
+            assert(parent:sum(1) == 100 and parent:sum(1, 2, 3.5) == 6.5)
+            assert(not pcall(parent.sum, parent) and not pcall(parent.sum, parent, 1, {}))
+            assert(cc.Node:count() == 0 and cc.Node:count('a', 'b') == 2 and not pcall(cc.Node.count, 'a'))
+
+            parent:setPosition(3, 4)
+            local x, y, extra = parent:getXY()
+            assert(x == 3 and y == 4 and extra == nil and select('#', parent:getXY()) == 2)
+            local owner, name, visible = a:describe()
+            assert(owner == parent and name == '' and visible == true)
+            assert(select('#', b:tags()) == 0)
+            local t1, t2, t3 = parent:tags()
+            assert(t1 == 1 and t2 == 2 and t3 == 3 and select('#', parent:tags()) == 3)
+
+            local children = parent:getChildren()
+            assert(#children == 3 and children[1] == a and children[3] == c and children[1]:kind() == 'sprite')
+            assert(parent:setChildren({c, a}) == parent and parent.childCount == 2 and parent:getChildren()[1] == c)
+            removed = b
+            assert(not pcall(parent.setChildren, parent, {a, 1}) and not pcall(parent.setChildren, parent, a))
+            parent:setOrders({7, '8'})
+            local orders = parent:orders()
+            assert(#orders == 2 and orders[1] == 7 and orders[2] == 8)
+            assert(not pcall(parent.setOrders, parent, {1, {}}))
+
+            assert(parent:firstTag() == 3 and b:firstTag() == nil and select('#', b:firstTag()) == 1)
+            parent:moveBy(nil); assert(parent:getXY() == 3)
+            parent:moveBy({x = 1, y = 1}); assert(parent:getXY() == 4)
+            assert(not pcall(parent.moveBy, parent, 5) and not pcall(parent.moveBy, parent))
+
+            assert(parent.x == 4)
+            parent.x = 10
+            assert(parent.x == 10 and parent:getXY() == 10)
+            parent.childCount = 9                       -- no setter: an instance field
+            assert(parent.childCount == 9)
+        )lua");
+        // A null object would end the array.
+        parent->children.insert(parent->children.begin() + 1, nullptr);
+        lua.dostring("local list = parent:getChildren(); assert(#list == 2 and list[1] and list[2])");
+        parent->children.erase(parent->children.begin() + 1);
+        for (Node* child : parent->children) created.push_back(child);
+        lua_getglobal(L, "removed");
+        check(named_object::is_a(L, -1, "cc.Node") && lua_gettop(L) == 1, "the stack is balanced");
+        created.push_back(static_cast<Node*>(named_object::pointer(L, -1)));
+        lua_pop(L, 1);
+        for (Ref* ref : created) lua.invalidate_named_object(ref, "cc.Ref");
+    }
+    for (Ref* ref : created) delete ref;
+    check(Ref::live == before, "the host released its objects");
+}
+
+// Plain functions with the conversions of typed members.
+void functions_with_named_conversions() {
+    const int before = Ref::live;
+    std::vector<Ref*> created;
+    {
+        state vm;
+        lua_State* L = vm.get();
+        luaL_openlibs(L);
+        binder lua(L);
+        register_engine(lua);
+        auto* node = new Sprite;
+        created.push_back(node);
+        check(named_object::push(L, static_cast<Node*>(node)), "expose a node");
+        lua_setglobal(L, "node");
+        lua.reg_named_func("util.kindOf", [](Node* value) { return value ? value->kind() : "nil"; });
+        lua.reg_named_func("util.distance",
+            [](const Vec2& a, const Vec2& b) { return std::abs(a.x - b.x) + std::abs(a.y - b.y); },
+            [](float ax, float ay, float bx, float by) { return std::abs(ax - bx) + std::abs(ay - by); });
+        lua.reg_named_func("util.origin", [] { return Vec2{1, 2}; });
+        lua.reg_named_func("util.pick", [](int index, lua_values<Node*> nodes) -> Node* {
+            return index >= 1 && static_cast<std::size_t>(index) <= nodes.size() ? nodes[static_cast<std::size_t>(index - 1)] : nullptr;
+        });
+        lua.reg_named_func("util.fail", [] { throw std::runtime_error("native failure"); });
+        // const Bounds* has its own conversion; Bounds* is still an object.
+        lua.reg_named_func("util.area", [](const Bounds* bounds) { return bounds; });
+        lua.reg_named_func("util.width", [](Bounds* bounds) { return bounds ? bounds->width : -1.0f; });
+        lua.set_namespace("math2");
+        lua.reg_named_func("twice", [](double value) { return value * 2; });
+        lua.set_namespace("");
+        lua.dostring(R"lua(
+            assert(util.kindOf(node) == 'sprite' and util.kindOf(nil) == 'nil')
+            assert(util.distance({x = 0, y = 0}, {x = 3, y = 4}) == 7 and util.distance(0, 0, 1, 1) == 2)
+            local origin = util.origin()
+            assert(origin.x == 1 and origin.y == 2 and select('#', util.origin()) == 1)
+            assert(util.pick(1, node) == node and util.pick(2, node) == nil and util.pick(1) == nil)
+            assert(math2.twice(4) == 8)
+            local ok, message = pcall(util.distance, 1, 2, 3)
+            assert(not ok and message:find("invalid arguments to", 1, true) and message:find('(3 given)', 1, true), message)
+            ok, message = pcall(util.kindOf, 'text')
+            assert(not ok and message:find('(1 given)', 1, true), message)
+            ok, message = pcall(util.fail)
+            assert(not ok and message:find('native failure', 1, true), message)
+            assert(not pcall(util.origin, 1))
+            local bounds = cc.Bounds:new()
+            bounds.width = 3
+            assert(util.area(4) == 16 and not pcall(util.area, bounds))
+            assert(util.width(bounds) == 3 and util.width(nil) == -1 and not pcall(util.width, 4))
+        )lua");
+        check(lua_gettop(L) == 0, "the stack is balanced");
+        for (Ref* ref : created) lua.invalidate_named_object(ref, "cc.Ref");
+    }
+    for (Ref* ref : created) delete ref;
+    check(Ref::live == before, "the host released its objects");
+}
+// lua_rest takes the remaining arguments where they are; lua_pushed returns
+// the values a callable pushed itself. Neither converts or allocates.
+void values_left_on_the_stack() {
+    const int before = Ref::live;
+    std::vector<Ref*> created;
+    {
+        state vm;
+        lua_State* L = vm.get();
+        luaL_openlibs(L);
+        binder lua(L);
+        register_engine(lua);
+        auto* node = new Node;
+        created.push_back(node);
+        check(named_object::push(L, node), "expose a node");
+        lua_setglobal(L, "node");
+        lua.reg_named_class<Node>("cc.Node").reg_method("extras", [](Node*, int base, lua_rest rest) {
+            return base + static_cast<int>(rest.size());
+        });
+        lua.reg_named_func("util.count", [](lua_rest rest) { return static_cast<int>(rest.size()); });
+        lua.reg_named_func("util.kinds", [](lua_rest rest) {
+            std::string kinds;
+            for (std::size_t i = 0; i < rest.size(); ++i) kinds += lua_typename(rest.state, lua_type(rest.state, rest.index(i)))[0];
+            return kinds;
+        });
+        lua.reg_named_func("util.swap", [](lua_rest rest) -> lua_pushed {
+            if (rest.size() < 2) return {};
+            lua_pushvalue(rest.state, rest.index(1));
+            lua_pushvalue(rest.state, rest.index(0));
+            return {2};
+        });
+        lua.reg_named_func("util.broken", [] { return lua_pushed{3}; });
+        lua.dostring(R"lua(
+            assert(util.count() == 0 and util.count(1, nil, 'x') == 3)
+            assert(util.kinds(1, 'a', {}, nil, true) == 'nstnb')
+            assert(node:extras(10) == 10 and node:extras(10, 'a', {}, nil) == 13)
+            assert(not pcall(node.extras, node))
+            local a, b = util.swap(1, 'x')
+            assert(a == 'x' and b == 1)
+            assert(select('#', util.swap(1)) == 0 and select('#', util.swap(1, 2, 3)) == 2)
+            local ok, message = pcall(util.broken)
+            assert(not ok and message:find('not on the stack', 1, true), message)
+        )lua");
+        check(lua_gettop(L) == 0, "the stack is balanced");
+        for (Ref* ref : created) lua.invalidate_named_object(ref, "cc.Ref");
+    }
+    for (Ref* ref : created) delete ref;
+    check(Ref::live == before, "the host released its objects");
+}
+
+// Raw callbacks read their arguments with the conversions of typed parameters.
+int raw_describe(lua_State* L) {
+    Node* node = nullptr;
+    int count = 0;
+    Vec2 offset{};
+    if (!named_read(L, 1, node) || !named_read(L, 2, count) || !named_read(L, 3, offset)) return 0;
+    lua_pushstring(L, node ? node->kind() : "nil");
+    lua_pushnumber(L, count + offset.x + offset.y);
+    return 2;
+}
+
+void typed_reads_in_raw_callbacks() {
+    const int before = Ref::live;
+    std::vector<Ref*> created;
+    {
+        state vm;
+        lua_State* L = vm.get();
+        luaL_openlibs(L);
+        binder lua(L);
+        register_engine(lua);
+        auto* node = new Sprite;
+        created.push_back(node);
+        check(named_object::push(L, static_cast<Node*>(node)), "expose a node");
+        lua_setglobal(L, "node");
+        auto* gone = new Node;
+        check(named_object::push(L, gone), "expose a node that is destroyed below");
+        lua_setglobal(L, "gone");
+        lua.invalidate_named_object(gone, "cc.Ref");
+        delete gone;
+        lua.reg_func("describe", raw_describe);
+        lua.dostring(R"lua(
+            local kind, sum = describe(node, 1, {x = 2, y = 3})
+            assert(kind == 'sprite' and sum == 6)
+            -- nil and a destroyed object arrive as nullptr, a numeric string as a number
+            assert(describe(nil, '4', {x = 0, y = 0}) == 'nil' and describe(gone, 0, {x = 0, y = 0}) == 'nil')
+            -- a value of another type does not convert
+            assert(select('#', describe(cc.Bounds:new(), 1, {x = 0, y = 0})) == 0)
+            assert(select('#', describe(node, {}, {x = 0, y = 0})) == 0 and select('#', describe(node, 1, 5)) == 0)
+        )lua");
+        std::string text;
+        std::vector<int> numbers;
+        check(luaL_dostring(L, "return 'name', {1, 2, 3}") == 0, "push a string and an array");
+        check(named_read(L, -2, text) && text == "name", "named_read converts a string");
+        check(named_read(L, -1, numbers) && numbers.size() == 3 && numbers[2] == 3, "named_read converts an array");
+        check(!named_read(L, -2, numbers), "named_read reports a value that does not convert");
+        lua_settop(L, 0);
+        for (Ref* ref : created) lua.invalidate_named_object(ref, "cc.Ref");
+    }
+    for (Ref* ref : created) delete ref;
+    check(Ref::live == before, "the host released its objects");
+}
 } // namespace
 
 int main() {
@@ -415,6 +701,10 @@ int main() {
         lua_owned_values();
         owned_objects_of_a_pinned_hierarchy();
         classes_bound_by_name();
+        several_values();
+        functions_with_named_conversions();
+        values_left_on_the_stack();
+        typed_reads_in_raw_callbacks();
         std::cout << "named_typed: " << checks << " checks passed\n";
     } catch (const std::exception& exception) {
         std::cerr << exception.what() << '\n';
