@@ -212,7 +212,9 @@ fn scheduler_timers_and_deferred_tasks_have_contracts() {
     accepts(
         "local async function blink(): () await scheduler.sleep(500) await scheduler.sleep_realtime(0) end local t: Task<> = scheduler.sleep(1000)",
     );
-    accepts("local more: boolean = scheduler.step(64, 16) local again: boolean = scheduler.step(nil, 0)");
+    accepts(
+        "local more: boolean = scheduler.step(64, 16) local again: boolean = scheduler.step(nil, 0)",
+    );
     rejects("scheduler.sleep()", "T006");
     rejects("scheduler.sleep('1')", "T001");
     rejects("scheduler.sleep_realtime(false)", "T001");
@@ -234,7 +236,10 @@ fn scheduler_timers_and_deferred_tasks_have_contracts() {
     );
     rejects("scheduler.deferred(1)", "T006");
     rejects("local _, _, reject = scheduler.deferred() reject()", "T006");
-    rejects("local _, resolve = scheduler.deferred() local n: number = resolve(1)", "T001");
+    rejects(
+        "local _, resolve = scheduler.deferred() local n: number = resolve(1)",
+        "T001",
+    );
     rejects("local task = scheduler.deferred() task()", "T007");
 }
 #[test]

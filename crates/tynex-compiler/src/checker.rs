@@ -200,11 +200,17 @@ pub fn check(body: &[Stmt], mode: Mode, modules: &BTreeMap<String, Interface>) -
                 // Timers complete with no value: Task<>.
                 (
                     "sleep",
-                    function(vec![Type::Number], Type::Task(Box::new(Pack::fixed(vec![])))),
+                    function(
+                        vec![Type::Number],
+                        Type::Task(Box::new(Pack::fixed(vec![]))),
+                    ),
                 ),
                 (
                     "sleep_realtime",
-                    function(vec![Type::Number], Type::Task(Box::new(Pack::fixed(vec![])))),
+                    function(
+                        vec![Type::Number],
+                        Type::Task(Box::new(Pack::fixed(vec![]))),
+                    ),
                 ),
                 // deferred() returns the Task, then resolve(...) and reject(error). The Task is a
                 // dynamic adapter like from_worker: an explicit Task<T> annotation names its result.
@@ -2292,7 +2298,11 @@ impl Checker<'_> {
             }
             Type::AsyncAll | Type::AsyncRace => {
                 let all = *ty == Type::AsyncAll;
-                let name = if all { "scheduler.all" } else { "scheduler.race" };
+                let name = if all {
+                    "scheduler.all"
+                } else {
+                    "scheduler.race"
+                };
                 let actual = self.expressions(arguments, &[], None);
                 let dynamic = actual.tail.as_ref().is_some_and(|t| {
                     **t == Type::Any || **t == Type::Unknown && self.mode == Mode::Gradual
