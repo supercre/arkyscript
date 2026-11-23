@@ -30,6 +30,9 @@ pub(crate) struct Analysis {
     pub errors: Vec<Diagnostic>,
     pub imports: Vec<Import>,
     pub interface: Interface,
+    /// The module reads the runtime's `scheduler`, `fs` or `net`, which exist only in the
+    /// environment the runtime gives Arky modules.
+    pub runtime_names: bool,
 }
 struct Checker<'a> {
     modules: &'a BTreeMap<String, Interface>,
@@ -45,6 +48,7 @@ struct Checker<'a> {
     local_nominals: HashSet<u64>,
     active_impls: HashSet<u64>,
     async_body: bool,
+    runtime_names: bool,
 }
 
 fn callable_results(is_async: bool, result: Pack) -> Pack {
@@ -102,6 +106,7 @@ pub fn check(body: &[Stmt], mode: Mode, modules: &BTreeMap<String, Interface>) -
         active_impls: HashSet::new(),
         self_type: None,
         async_body: false,
+        runtime_names: false,
     };
     for module in modules.values() {
         for (id, incoming) in &module.nominals {
@@ -305,6 +310,7 @@ pub fn check(body: &[Stmt], mode: Mode, modules: &BTreeMap<String, Interface>) -
             value,
             nominals: c.nominals,
         },
+        runtime_names: c.runtime_names,
     }
 }
 fn module_value(ty: Type) -> Type {
@@ -1947,6 +1953,17 @@ impl Checker<'_> {
             ExprKind::String(_) => Type::String,
             ExprKind::Bool(_) => Type::Boolean,
             ExprKind::Name(name) => {
+                // A built-in, not a local of the same name: generated code reads it from the
+                // runtime's environment.
+                if matches!(name.as_str(), "scheduler" | "fs" | "net")
+                    && self
+                        .scopes
+                        .iter()
+                        .skip(1)
+                        .all(|scope| !scope.contains_key(name))
+                {
+                    self.runtime_names = true;
+                }
                 self.lookup(name)
                     .map(|v| v.current.clone())
                     .unwrap_or_else(|| {

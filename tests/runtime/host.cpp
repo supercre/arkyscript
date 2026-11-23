@@ -29,9 +29,9 @@ template<class F> void fails(F&& call, const char* expected) {
 void run(lua_State* L, const char* code) {
     if (luaL_dostring(L, code) == 0) return;
     const char* text = lua_tostring(L, -1);
-    std::string message = text ? text : "error object is not a string";
+    std::string message = text ? text : std::string("error object is a ") + luaL_typename(L, -1);
     lua_pop(L, 1);
-    throw std::runtime_error(message);
+    throw std::runtime_error(message + " in: " + std::string(code).substr(0, 80));
 }
 // Steps once per "frame" until no task is pending.
 int frames_until_idle(lua_State* L, int max_resumes = 64) {
@@ -103,7 +103,8 @@ void lifecycle() {
     fails([&] { arky::runtime::open(L); }, "already open");
     check(!arky::runtime::step(L), "an idle runtime has nothing pending");
     fails([&] { arky::runtime::step(L, 0); }, "integer budget");
-    fails([&] { arky::runtime::import_module(L, "main"); }, "unprepared static import 'main'");
+    // Without a loader static imports use require, which knows no module 'main'.
+    fails([&] { arky::runtime::import_module(L, "main"); }, "module 'main' not found");
     // The runtime is reached through the environment of generated chunks, not through globals.
     run(L, "assert(scheduler == nil and fs == nil and net == nil)");
     run(L, "assert(__tynex_import == nil and __tynex_async_runtime == nil)");
@@ -560,6 +561,71 @@ for i = 1, 8 do read("slow://" .. i) end
     }
 }
 
+// A host without an import loader, like a game engine with module loaders of its own: legacy
+// code loads Arky modules with require, and static imports use require too.
+void plain_require() {
+    arky::state vm;
+    lua_State* L = vm.get();
+    arky::runtime::open(L);
+    // What the compiler emits for an Arky module with a static import and async functions. The
+    // first line mirrors RUNTIME_ENVIRONMENT in crates/tynex-compiler/src/lib.rs.
+    static const char arky_module[] =
+        "if __tynex_import == nil or __tynex_async_runtime == nil then local __tynex_host = package and "
+        "package.loaded and package.loaded.tynex_runtime; if __tynex_host then setfenv(1, __tynex_host.environment) "
+        "end end; "
+        "local __tynex_import = assert(__tynex_import, 'static import requires the Tynex project loader'); "
+        "local __tynex_async_runtime = assert(__tynex_async_runtime, 'async requires the Tynex async runtime'); "
+        "local function __tynex_async_values(...) return ... end;\n"
+        "local shared = __tynex_import('shared')\n"
+        "shared.count = shared.count + 1\n"
+        "local wait = __tynex_async_runtime.create(function()\n"
+        "   __tynex_async_runtime.await(scheduler.sleep(0))\n"
+        "   return 'ready'\n"
+        "end)\n"
+        "return {task = wait(), shared = shared, environment = getfenv(1)}\n";
+    // The host's loaders find the modules; package.preload stands in for them here.
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "preload");
+    check(luaL_loadstring(L, "return {count = 0}") == 0, "cannot load the shared module");
+    lua_setfield(L, -2, "shared");
+    check(luaL_loadstring(L, arky_module) == 0, "cannot load the Arky module");
+    lua_setfield(L, -2, "game.panel");
+    lua_pop(L, 2);
+
+    run(L, R"lua(
+local panel = require("game.panel")
+-- The module took the runtime's environment; no global was added for it.
+assert(panel.environment ~= _G and panel.environment.scheduler ~= nil)
+assert(scheduler == nil and __tynex_import == nil and __tynex_async_runtime == nil)
+-- Its static import and legacy require share one module.
+assert(panel.shared == require("shared") and panel.shared.count == 1)
+assert(panel.task:status() == "waiting")
+)lua");
+    arky::runtime::import_module(L, "game.panel");
+    lua_getglobal(L, "require");
+    lua_pushliteral(L, "game.panel");
+    lua_call(L, 1, 1);
+    check(lua_rawequal(L, -1, -2) != 0, "import_module and require give the same module");
+    lua_pop(L, 2);
+    frames_until_idle(L);
+    run(L, "assert(require('game.panel').task:result() == 'ready')");
+
+    // Without the runtime a freshly loaded Arky module fails at once and says what it misses. (The
+    // chunk loaded above keeps the environment it took: setfenv changed that function for good.)
+    arky::runtime::close(L);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "preload");
+    check(luaL_loadstring(L, arky_module) == 0, "cannot load the Arky module");
+    lua_setfield(L, -2, "game.closed");
+    lua_pop(L, 2);
+    run(L, R"lua(
+assert(package.loaded.tynex_runtime == nil)
+local ok, message = pcall(require, "game.closed")
+assert(not ok and tostring(message):find("static import requires the Tynex project loader", 1, true), tostring(message))
+)lua");
+    check(lua_gettop(L) == 0, "the runtime leaves the caller's stack as it was");
+}
+
 // What a finalizer met while its Lua state was closing.
 struct {
     std::string handle;
@@ -636,8 +702,9 @@ int main() {
         restart();
         teardown();
         host_owned_state();
+        plain_require();
         std::cout << "Host runtime: lifecycle, imports, workers, file reader, timers, recursion, deferred tasks, "
-                     "isolation, restart, teardown and host-owned Lua states passed\n";
+                     "isolation, restart, teardown, host-owned Lua states and plain require passed\n";
     } catch (const std::exception& failure) {
         std::cerr << "host runtime: " << failure.what() << '\n';
         return 1;

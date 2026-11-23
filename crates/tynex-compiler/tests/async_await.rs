@@ -507,3 +507,41 @@ fn task_annotations_hold_at_explicit_dynamic_boundaries() {
         "T001",
     );
 }
+#[test]
+fn modules_which_read_the_runtime_take_its_environment_under_a_plain_require() {
+    const SWITCH: &str = "package.loaded.tynex_runtime";
+    let generated = |source: &str, mode: Mode| compile(source, mode, true).unwrap().lua;
+    // async, a static import, and reads of scheduler, fs or net need the runtime's environment.
+    for source in [
+        "local async function f(): number return 1 end",
+        "local t: Task<any> = scheduler.deferred()",
+        "local read = fs.read_file",
+        "local connect = net.connect",
+    ] {
+        assert!(generated(source, Mode::Strict).contains(SWITCH), "{source}");
+    }
+    assert!(generated("import util from \"util\"", Mode::Gradual).contains(SWITCH));
+    // A local of the same name is not the runtime's, and plain code stays plain Lua.
+    for source in [
+        "local scheduler = {name = 'mine'} local n: string = scheduler.name",
+        "local x: number = 1 print(x)",
+    ] {
+        assert!(
+            !generated(source, Mode::Strict).contains(SWITCH),
+            "{source}"
+        );
+    }
+    // The switch comes first, before any helper which reads the environment, and keeps the
+    // original line numbers.
+    let lua = generated(
+        "local async function f(): ()\n   await scheduler.sleep(1)\nend",
+        Mode::Gradual,
+    );
+    assert!(lua.starts_with("if __tynex_async_runtime == nil then"));
+    // A static import checks for the loader it needs: a host may supply that one itself.
+    assert!(
+        generated("import util from \"util\"", Mode::Gradual)
+            .starts_with("if __tynex_import == nil then")
+    );
+    assert_eq!(lua.lines().count(), 3);
+}

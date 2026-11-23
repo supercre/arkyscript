@@ -185,6 +185,23 @@ impl Prepared {
         }
         let lua = String::from_utf8(lua).expect("complete-token erasure preserves UTF-8");
         let mut emitter = source_map::Emitter::default();
+        // The CLI and a host's static import load Arky modules in the runtime's environment. A
+        // plain require (legacy code in a game host) does not: a module which misses a name it
+        // needs then takes that environment from the runtime itself, before any helper reads it.
+        // A host which supplies the names some other way is left alone.
+        let mut missing = Vec::new();
+        if self.imports {
+            missing.push("__tynex_import == nil");
+        }
+        if self.async_runtime || analysis.runtime_names {
+            missing.push("__tynex_async_runtime == nil");
+        }
+        if !missing.is_empty() {
+            emitter.helper(&format!(
+                "if {} then {RUNTIME_ENVIRONMENT} end; ",
+                missing.join(" or ")
+            ));
+        }
         if self.imports {
             // The runner supplies a graph-bound loader. Standalone generated Lua
             // must be embedded with the same explicit loader contract.
@@ -234,6 +251,10 @@ impl Prepared {
         })
     }
 }
+
+// The host runtime publishes the environment of Arky modules as package.loaded.tynex_runtime.
+// Without it nothing changes, and the helpers below report the missing name.
+const RUNTIME_ENVIRONMENT: &str = "local __tynex_host = package and package.loaded and package.loaded.tynex_runtime; if __tynex_host then setfenv(1, __tynex_host.environment) end";
 
 // Capturing the builtins before executing user code keeps lowered constructors
 // independent of later local declarations or global reassignment. Helper code

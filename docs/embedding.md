@@ -46,15 +46,19 @@ arky::runtime::step(L, delta_seconds);
 
 ## 생성 코드가 보는 이름
 
-`scheduler`, `fs`, `net`과 컴파일러가 쓰는 `__tynex_import`, `__tynex_async_runtime`은 전역 변수로 만들지 않는다. import로 로드한 청크의 환경에만 있으므로 레거시 스크립트의 전역과 겹치지 않는다. 그 환경은 다른 이름을 `_G`에서 읽고 `_G`에 쓴다.
+`scheduler`, `fs`, `net`과 컴파일러가 쓰는 `__tynex_import`, `__tynex_async_runtime`은 전역 변수로 만들지 않는다. Arky 모듈의 환경에만 있으므로 레거시 스크립트의 전역과 겹치지 않는다. 그 환경은 다른 이름을 `_G`에서 읽고 `_G`에 쓴다.
+
+런타임은 이 환경을 `package.loaded.tynex_runtime.environment`로 내놓는다. 이 이름들을 쓰는 Arky 모듈(async, 정적 import, `scheduler`·`fs`·`net`)은 컴파일러가 첫 줄에 넣은 코드로, 환경 없이 로드되면 스스로 이 환경으로 바꾼다. 그래서 레거시 코드가 호스트의 평소 로더로 `require("game.panel")`처럼 불러도 동작한다. 원문이든 바이트코드든, 암호화된 팩에 있든 상관없다. 필요한 이름을 호스트가 직접 넣어 둔 경우(예: 전역 `__tynex_import`)에는 바꾸지 않는다. 런타임이 없으면 환경을 바꾸지 않고, 모듈이 `async requires the Tynex async runtime` 같은 오류로 바로 멈춘다. 이 이름들을 쓰지 않는 Arky 모듈은 보통의 Lua와 같아서 어디서나 그대로 동작한다.
 
 `require("tynex_task")`와 `require("tynex_io")`는 런타임에 들어 있는 모듈을 돌려준다. [Task 예제](../examples/tasks/README.md)의 레거시 래퍼 모듈(`return require("tynex_task")`)이 그대로 동작한다. 호스트가 같은 이름으로 먼저 로드한 모듈이 있으면 바꾸지 않는다.
 
 ## import 로더
 
-`import x from "name"`은 `options::import_loader`를 부른다. 로더는 모듈의 Lua를 `module.chunk`에 담고 참을 돌려주며, 그런 모듈이 없으면 거짓을 돌려준다. `chunk`는 생성된 Lua 원문이나 LuaJIT 바이트코드다. `module.name`은 오류 메시지와 traceback에 쓰이며 비워 두면 모듈 이름을 쓴다.
+로더를 주지 않으면 `import x from "name"`은 Lua의 `require("name")`이다. 게임 엔진처럼 모듈 로더를 이미 가진 호스트에 맞는 방식이다. 정적 import와 레거시 `require`가 `package.loaded`를 함께 써서 같은 모듈을 두 번 실행하지 않고, 호스트의 로더(검색 경로, 바이트코드, 복호화)를 그대로 쓴다. `import_module`도 같다.
 
-- 모듈은 한 번 실행하고 값을 캐시한다. 값을 돌려주지 않는 모듈의 값은 `true`다.
+로더를 주면 `import x from "name"`은 `options::import_loader`를 부른다. 로더는 모듈의 Lua를 `module.chunk`에 담고 참을 돌려주며, 그런 모듈이 없으면 거짓을 돌려준다. `chunk`는 생성된 Lua 원문이나 LuaJIT 바이트코드다. `module.name`은 오류 메시지와 traceback에 쓰이며 비워 두면 모듈 이름을 쓴다.
+
+- 로더로 읽은 모듈은 Arky 모듈의 환경에서 한 번 실행하고 값을 캐시한다. 값을 돌려주지 않는 모듈의 값은 `true`다. 이 캐시는 `package.loaded`와 따로다.
 - 순환 import와 로더가 모르는 모듈은 오류다(`cyclic static import`, `unprepared static import`).
 - 실패한 모듈은 캐시하지 않으며, 모듈이 낸 오류 값은 바꾸지 않고 import한 코드에 전달한다.
 

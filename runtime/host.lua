@@ -1,7 +1,11 @@
 -- Typed environment and static imports for an embedding host (arky_runtime.cpp).
 -- The CLI applies the same rules in runner.lua from a prepared manifest; a host
 -- has no manifest, so modules come from its reader as they are first imported.
-local scheduler, read_module = ...
+-- A host without a reader (a game engine with its own module loaders) imports
+-- through require: static imports and legacy require then share package.loaded,
+-- and Arky modules loaded that way take this environment themselves (see the
+-- compiler's RUNTIME_ENVIRONMENT and package.loaded.tynex_runtime).
+local scheduler, read_module, use_require = ...
 local load_text, set_environment, protected_call, raise = loadstring, setfenv, pcall, error
 local lua_type, set_meta = type, setmetatable
 
@@ -21,6 +25,8 @@ end
 -- nothing has the value true, as with the CLI's static imports.
 local function import(name)
    if lua_type(name) ~= "string" then raise("static import expects a module name", 2) end
+   -- The global require at the time of the import, so that a host's own loaders apply.
+   if use_require then return require(name) end
    local cached = modules[name]
    if cached then return cached.value end
    if loading[name] then raise("cyclic static import '" .. name .. "'", 2) end
@@ -46,4 +52,4 @@ environment = set_meta({__tynex_import = import, __tynex_async_runtime = schedul
    scheduler = public_scheduler, fs = scheduler.fs, net = scheduler.net},
    {__index = _G, __newindex = _G})
 
-return {step = scheduler.step, import = import}
+return {step = scheduler.step, import = import, environment = environment}

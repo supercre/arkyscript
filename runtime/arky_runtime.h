@@ -44,6 +44,10 @@ struct module_source {
 struct options {
     // Static imports (`import x from "name"`). Fills `module` and returns true, or returns
     // false when the host has no module of that name. Runs on the Lua thread.
+    // Without a loader, static imports use the Lua state's require (and its package.loaded),
+    // as a game engine with its own module loaders wants: legacy require and Arky imports then
+    // share every module, and an Arky module loaded by require takes the runtime's environment
+    // itself from package.loaded.tynex_runtime.
     std::function<bool(std::string_view name, module_source& module)> import_loader;
 
     // Source of fs.read_file, for hosts which keep files in archives. Runs on a worker thread of
@@ -54,7 +58,8 @@ struct options {
 };
 
 // Installs the runtime into L. One runtime per Lua state: opening twice is an error.
-// `require("tynex_task")` and `require("tynex_io")` return the modules compiled into the runtime.
+// `require("tynex_task")` and `require("tynex_io")` return the modules compiled into the runtime;
+// package.loaded.tynex_runtime holds the environment of Arky modules (for generated code).
 void open(lua_State* L, const options& settings = {});
 
 // True between open and close (or until the Lua state is closed).

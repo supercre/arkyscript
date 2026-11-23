@@ -19,7 +19,8 @@ namespace {
 // The runtime of a Lua state is a table in its registry under this key. Its values sit in
 // integer slots, so the step of every frame needs no string lookup.
 char state_key;
-enum : int { slot_step = 1, slot_import, slot_deferred, slot_shutdown, slot_host, slot_task, slot_io, slot_count = slot_io };
+enum : int { slot_step = 1, slot_import, slot_deferred, slot_shutdown, slot_host, slot_task, slot_io, slot_environment,
+             slot_count = slot_environment };
 // A coroutine of the runtime's own, kept for the life of the Lua state. It is never suspended, so the
 // host can always run a call on it: a deferred handle may be created inside an async function, whose
 // own coroutine is suspended by the time the handle is resolved.
@@ -193,8 +194,18 @@ int install(lua_State* L) {
     lua_pushvalue(L, scheduler);
     lua_pushvalue(L, host);
     lua_pushcclosure(L, read_module, 1);
-    if (lua_pcall(L, 2, 1, 0) != 0) throw error("host bridge: " + failure(L));
+    lua_pushboolean(L, !settings->import_loader);   // no loader: static imports use require
+    if (lua_pcall(L, 3, 1, 0) != 0) throw error("host bridge: " + failure(L));
     const int bridge = lua_gettop(L);
+
+    // An Arky module loaded by a plain require takes the typed environment from here.
+    lua_createtable(L, 0, 1);
+    lua_getfield(L, bridge, "environment");
+    lua_setfield(L, -2, "environment");
+    const int environment = lua_gettop(L);
+    lua_getfield(L, LUA_REGISTRYINDEX, "_LOADED");
+    if (lua_istable(L, -1)) publish(L, "tynex_runtime", environment);
+    lua_pop(L, 1);
 
     lua_pushlightuserdata(L, &thread_key);
     lua_rawget(L, LUA_REGISTRYINDEX);
@@ -220,6 +231,8 @@ int install(lua_State* L) {
     lua_rawseti(L, -2, slot_task);
     lua_pushvalue(L, io);
     lua_rawseti(L, -2, slot_io);
+    lua_pushvalue(L, environment);
+    lua_rawseti(L, -2, slot_environment);
     lua_pushlightuserdata(L, &state_key);
     lua_insert(L, -2);
     lua_rawset(L, LUA_REGISTRYINDEX);
@@ -302,6 +315,7 @@ void close(lua_State* L) {
     if (lua_istable(L, -1)) {
         withdraw(L, "tynex_task", state, slot_task);
         withdraw(L, "tynex_io", state, slot_io);
+        withdraw(L, "tynex_runtime", state, slot_environment);
     }
     lua_pushlightuserdata(L, &state_key);
     lua_pushnil(L);
