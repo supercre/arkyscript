@@ -1,5 +1,7 @@
+#define _CRT_SECURE_NO_WARNINGS // std::getenv for ARKY_TEST_TRACE
 #include "binder/lua_binder.h"
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
@@ -696,15 +698,21 @@ void typed_reads_in_raw_callbacks() {
 } // namespace
 
 int main() {
+    // With ARKY_TEST_TRACE set, each part is named before it runs, so a crash shows where it happened.
+    const bool trace = std::getenv("ARKY_TEST_TRACE") != nullptr;
+    const auto run = [trace](const char* name, void (*part)()) {
+        if (trace) std::cerr << "named_typed: " << name << std::endl;
+        part();
+    };
     try {
-        registration_in_sample_form();
-        lua_owned_values();
-        owned_objects_of_a_pinned_hierarchy();
-        classes_bound_by_name();
-        several_values();
-        functions_with_named_conversions();
-        values_left_on_the_stack();
-        typed_reads_in_raw_callbacks();
+        run("registration_in_sample_form", registration_in_sample_form);
+        run("lua_owned_values", lua_owned_values);
+        run("owned_objects_of_a_pinned_hierarchy", owned_objects_of_a_pinned_hierarchy);
+        run("classes_bound_by_name", classes_bound_by_name);
+        run("several_values", several_values);
+        run("functions_with_named_conversions", functions_with_named_conversions);
+        run("values_left_on_the_stack", values_left_on_the_stack);
+        run("typed_reads_in_raw_callbacks", typed_reads_in_raw_callbacks);
         std::cout << "named_typed: " << checks << " checks passed\n";
     } catch (const std::exception& exception) {
         std::cerr << exception.what() << '\n';

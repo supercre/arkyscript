@@ -81,8 +81,10 @@ jobs:
             $exe = @(Get-ChildItem binder-artifacts -Recurse -Filter $name)
             if ($exe.Count -ne 1) { throw "Expected one $name" }
             & $exe[0].FullName
-            if ($LASTEXITCODE -ne 0) { throw "$name failed" }
+            if ($LASTEXITCODE -ne 0) { throw ("{0} failed with exit code 0x{1:X8}" -f $name, $LASTEXITCODE) }
           }
+        env:
+          ARKY_TEST_TRACE: '1'
       - name: Execute JIT, FFI and static embedding smoke tests
         shell: pwsh
         run: |
