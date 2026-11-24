@@ -55,6 +55,11 @@ struct options {
     // with at most max_bytes and returns true, or returns false with a message in `error`.
     // Without it fs.read_file reads regular files of the operating system.
     std::function<bool(std::string_view path, std::size_t max_bytes, std::string& bytes, std::string& error)> file_reader;
+
+    // LuaJIT's JIT compiler in the Lua states which run worker tasks. Every task runs in a fresh
+    // state of its own; false turns the JIT off there (luaJIT_setmode), for a host which runs its
+    // own Lua state interpreted and wants its tasks to match.
+    bool task_jit = true;
 };
 
 // Installs the runtime into L. One runtime per Lua state: opening twice is an error.

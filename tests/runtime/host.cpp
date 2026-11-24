@@ -223,6 +223,32 @@ worker_sum = main()
     run(L, "assert(worker_sum:result() == 250015000)");
 }
 
+// options::task_jit: the states which run tasks keep or lose the JIT; the host's own state keeps its mode.
+void task_jit() {
+    project files;
+    files.modules["task"] = "return require('tynex_task')";
+    files.modules["probe"] = R"lua(
+local task = __tynex_import("task")
+local function status() return (jit.status()) end
+local main = __tynex_async_runtime.create(function()
+   return __tynex_async_runtime.await(scheduler.from_worker(task.spawn(status)))
+end)
+jit_in_task = main()
+)lua";
+    for (const bool enabled : {true, false}) {
+        arky::state vm;
+        lua_State* L = vm.get();
+        auto settings = files.options();
+        settings.task_jit = enabled;
+        arky::runtime::open(L, settings);
+        arky::runtime::import_module(L, "probe");
+        lua_pop(L, 1);
+        frames_until_idle(L);
+        run(L, enabled ? "assert(jit_in_task:result() == true)" : "assert(jit_in_task:result() == false)");
+        run(L, "assert(jit.status() == true)");
+    }
+}
+
 void file_reads() {
     constexpr const char* reads = R"lua(
 local load = __tynex_async_runtime.create(function(path, limit)
@@ -694,6 +720,7 @@ int main() {
         lifecycle();
         imports();
         workers();
+        task_jit();
         file_reads();
         timers();
         recursion();
@@ -703,7 +730,7 @@ int main() {
         teardown();
         host_owned_state();
         plain_require();
-        std::cout << "Host runtime: lifecycle, imports, workers, file reader, timers, recursion, deferred tasks, "
+        std::cout << "Host runtime: lifecycle, imports, workers, task JIT, file reader, timers, recursion, deferred tasks, "
                      "isolation, restart, teardown, host-owned Lua states and plain require passed\n";
     } catch (const std::exception& failure) {
         std::cerr << "host runtime: " << failure.what() << '\n';

@@ -107,6 +107,16 @@ int http_get(lua_State* L) {
 - 거짓을 돌려주면 `error`의 메시지로 Task가 실패한다.
 - 리더가 있으면 모든 `fs.read_file`이 리더로 간다.
 
+## worker Task의 JIT
+
+worker Task는 Task마다 새 Lua 상태에서 실행된다. 기본으로는 그 상태에서 LuaJIT의 JIT가 켜져 있다. 자기 Lua 상태를 인터프리터로 돌리는 호스트(예: 서버 검증과 같은 실행 방식을 맞추는 게임)는 `options::task_jit = false`로 열어 Task 상태의 JIT도 끈다. 호스트 자신의 Lua 상태 JIT는 바꾸지 않는다. 호스트가 `luaJIT_setmode`로 따로 끈다.
+
+```cpp
+arky::runtime::options settings;
+settings.task_jit = false;          // Task를 실행하는 Lua 상태마다 luaJIT_setmode(..., LUAJIT_MODE_OFF)
+arky::runtime::open(L, settings);
+```
+
 ## 종료
 
 `close`는 worker 풀을 멈춘다. 실행 중인 worker 작업은 다음 `checkpoint()`에서 취소되며, 그때까지 `close`가 기다린다. 아직 끝나지 않은 Task는 완료되지 않고, 그 런타임의 `deferred` 핸들은 그때부터 아무 일도 하지 않는다. `close` 없이 `lua_close`만 해도 같은 순서로 해제된다.

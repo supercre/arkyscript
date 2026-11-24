@@ -21,6 +21,7 @@ struct pool_box {
     std::size_t workers = arky::task_pool::default_workers();
     std::size_t capacity = 4096;
     bool closed = false;
+    bool jit = true;   // LuaJIT's JIT in the states which run the tasks (runtime option task_jit)
 };
 struct handle_box {
     const void* tag = &box_tag<handle_box>;
@@ -97,11 +98,13 @@ struct stop_scope {
     ~stop_scope() { worker_stop = nullptr; }
 };
 
-arky::value execute(const std::string& code, const arky::value& input, arky::cancellation_token stop) {
+arky::value execute(const std::string& code, const arky::value& input, arky::cancellation_token stop, bool jit) {
     if (stop.stop_requested()) throw arky::task_cancelled();
     stop_scope context(stop);
     arky::state vm;
     lua_State* L = vm.get();
+    // After the standard libraries: opening the jit library turns the JIT on again.
+    if (!jit) luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF);
     if (luaL_loadbuffer(L, code.data(), code.size(), "@task") != 0)
         throw arky::error(lua_tostring(L, -1));
     arky::pusher<arky::value>::push(L, input);
@@ -110,7 +113,7 @@ arky::value execute(const std::string& code, const arky::value& input, arky::can
     lua_setfield(L, -2, "checkpoint");
     lua_pushcfunction(L, cancelled);
     lua_setfield(L, -2, "cancelled");
-    // No Lua references leave this VM. The JIT remains enabled normally.
+    // No Lua references leave this VM.
     if (lua_pcall(L, 2, 1, 0) != 0) {
         if (stop.stop_requested()) throw arky::task_cancelled();
         const char* error = lua_tostring(L, -1);
@@ -141,6 +144,12 @@ int configure(lua_State* L) {
     return 0;
 }
 
+// For the host runtime (options::task_jit): applies to the tasks spawned after the call.
+int set_jit(lua_State* L) {
+    pool(L).jit = lua_toboolean(L, 1) != 0;
+    return 0;
+}
+
 int spawn(lua_State* L) {
     auto& owner = pool(L);
     if (owner.closed) throw arky::error("task pool is shut down");
@@ -160,8 +169,8 @@ int spawn(lua_State* L) {
     luaL_getmetatable(L, handle_type);
     lua_setmetatable(L, -2);
     if (!owner.pool) owner.pool = std::make_unique<arky::task_pool>(owner.workers, owner.capacity);
-    box->value.emplace(owner.pool->submit([code = std::move(code), input = std::move(input)](arky::cancellation_token stop) {
-        return execute(code, input, stop);
+    box->value.emplace(owner.pool->submit([code = std::move(code), input = std::move(input), jit = owner.jit](arky::cancellation_token stop) {
+        return execute(code, input, stop, jit);
     }));
     return 1;
 }
@@ -234,6 +243,7 @@ int open(lua_State* L) {
     module_function<configure>(L, "configure", owner);
     module_function<spawn>(L, "spawn", owner);
     module_function<shutdown>(L, "shutdown", owner);
+    module_function<set_jit>(L, "_set_jit", owner);
     // Exact userdata validation protects the coroutine scheduler's native
     // adapter from forged Lua objects and replaced per-handle methods.
     method<ready>(L, "_async_ready");

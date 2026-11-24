@@ -167,6 +167,11 @@ int install(lua_State* L) {
     lua_pushcfunction(L, luaopen_tynex_task);
     if (lua_pcall(L, 0, 1, 0) != 0) throw error("task module: " + failure(L));
     const int task = lua_gettop(L);
+    if (!settings->task_jit) {
+        lua_getfield(L, task, "_set_jit");
+        lua_pushboolean(L, 0);
+        if (lua_pcall(L, 1, 0, 0) != 0) throw error("task module: " + failure(L));
+    }
     lua_pushvalue(L, host);
     lua_pushcclosure(L, open_io, 1);
     if (lua_pcall(L, 0, 1, 0) != 0) throw error("I/O module: " + failure(L));
